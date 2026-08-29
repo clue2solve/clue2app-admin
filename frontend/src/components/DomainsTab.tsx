@@ -49,9 +49,14 @@ export default function DomainsTab() {
 
   const fetchAll = useCallback(() => {
     setErr(null)
+    // Admin view (no PROJECT_ID) now fetches EVERY domain cross-tenant via the
+    // new /admin endpoint (coord #214) — previously it only saw the 2 rows
+    // flagged is_platform_domain=true, missing 6 project-scoped custom zones.
+    // The Domain record carries isPlatformDomain so DomainRegistryPanel can
+    // render a Platform badge for the ones tagged as such.
     const domainsPromise = PROJECT_ID
       ? coordinatorGet<Domain[]>(`/api/domains/?projectId=${PROJECT_ID}`)
-      : coordinatorGet<Domain[]>('/api/domains/platform')
+      : coordinatorGet<Domain[]>('/api/domains/admin')
     const assignmentsPromise = PROJECT_ID
       ? coordinatorGet<DomainAssignment[]>(`/api/domains/assignments?projectId=${PROJECT_ID}`)
       : Promise.resolve<DomainAssignment[]>([])

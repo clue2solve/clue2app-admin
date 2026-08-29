@@ -14,6 +14,8 @@ import {
   Alert,
   TextField,
   InputAdornment,
+  ToggleButton,
+  ToggleButtonGroup,
 } from '@mui/material'
 import SearchIcon from '@mui/icons-material/Search'
 import { motion } from 'framer-motion'
@@ -40,10 +42,15 @@ function formatDate(iso: string | null): string {
   }
 }
 
+type StatusFilter = 'active' | 'all'
+
 export default function UsersTab() {
   const [users, setUsers] = useState<User[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [q, setQ] = useState('')
+  // Default to active-only: disabled accounts are cleanup residue and shouldn't
+  // clutter the everyday admin view. Explicit toggle to show them all.
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('active')
 
   useEffect(() => {
     let cancelled = false
@@ -58,11 +65,18 @@ export default function UsersTab() {
     return () => { cancelled = true }
   }, [])
 
-  const filtered = users?.filter((u) =>
-    !q ||
-    (u.name ?? '').toLowerCase().includes(q.toLowerCase()) ||
-    (u.email ?? '').toLowerCase().includes(q.toLowerCase()) ||
-    u.id.toLowerCase().includes(q.toLowerCase())) ?? []
+  const filtered = users?.filter((u) => {
+    // Status filter first (cheap boolean check)
+    if (statusFilter === 'active' && u.enabled === false) return false
+    // Then text search
+    if (!q) return true
+    const needle = q.toLowerCase()
+    return (u.name ?? '').toLowerCase().includes(needle)
+      || (u.email ?? '').toLowerCase().includes(needle)
+      || u.id.toLowerCase().includes(needle)
+  }) ?? []
+
+  const disabledCount = users?.filter((u) => u.enabled === false).length ?? 0
 
   return (
     <motion.div
@@ -88,20 +102,36 @@ export default function UsersTab() {
 
       {users && (
         <>
-          <TextField
-            size="small"
-            placeholder="Filter by name, email, or id"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            sx={{ mb: 2, maxWidth: 360 }}
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start">
-                  <SearchIcon fontSize="small" />
-                </InputAdornment>
-              ),
-            }}
-          />
+          <Box sx={{ mb: 2, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
+            <TextField
+              size="small"
+              placeholder="Filter by name, email, or id"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              sx={{ maxWidth: 360, flex: '1 1 320px' }}
+              InputProps={{
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon fontSize="small" />
+                  </InputAdornment>
+                ),
+              }}
+            />
+            <ToggleButtonGroup
+              size="small"
+              value={statusFilter}
+              exclusive
+              onChange={(_, v) => v && setStatusFilter(v)}
+              aria-label="user status filter"
+            >
+              <ToggleButton value="active" aria-label="active only">
+                Active
+              </ToggleButton>
+              <ToggleButton value="all" aria-label="show all including disabled">
+                All {disabledCount > 0 && `(+${disabledCount} disabled)`}
+              </ToggleButton>
+            </ToggleButtonGroup>
+          </Box>
 
           <TableContainer component={Paper} variant="outlined">
             <Table size="small">

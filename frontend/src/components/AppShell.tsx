@@ -23,6 +23,7 @@ import AuditTab from './AuditTab'
 import KpackTab from './KpackTab'
 import PlatformLimitsTab from './PlatformLimitsTab'
 import DomainsTab from './DomainsTab'
+import ReleasesTab from './ReleasesTab'
 
 // -----------------------------------------------------------------------------
 // The path model. Every leaf in the sidebar owns a slash-delimited path — no
@@ -120,6 +121,8 @@ export default function AppShell(): JSX.Element {
         return <PlatformCostTab />
       case 'platform/billing':
         return <BillingTab />
+      case 'platform/releases':
+        return <ReleasesTab />
       case 'platform/agents':
         return (
           <AgentsTab

@@ -111,7 +111,7 @@ function ServicesTab({ onNavigateToTab }: ServicesTabProps) {
     return <Alert severity="error">{error}</Alert>
   }
 
-  const totalCost = services.reduce((sum, s) => sum + s.cost, 0)
+  const totalCost = services.reduce((sum, s) => sum + Number(s.cost ?? 0), 0)
 
   return (
     <Box>
@@ -186,7 +186,7 @@ function ServicesTab({ onNavigateToTab }: ServicesTabProps) {
                           />
                           <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
                             <Chip
-                              label={`$${service.cost.toFixed(2)}`}
+                              label={`$${Number(service.cost ?? 0).toFixed(2)}`}
                               size="small"
                               variant="outlined"
                             />

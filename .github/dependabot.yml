@@ -1,0 +1,39 @@
+# Dependabot — weekly dependency scans across every ecosystem this repo uses.
+# See https://docs.github.com/en/code-security/dependabot
+#
+# Groups minor + patch updates into single PRs to keep the noise down;
+# majors always get their own PR so we can read the changelog before merging.
+# Update this file when a new package ecosystem is added.
+
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "npm"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "pip"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"

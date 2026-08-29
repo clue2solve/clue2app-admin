@@ -26,6 +26,7 @@ import GroupsIcon from '@mui/icons-material/Groups'
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings'
 import MailOutlineIcon from '@mui/icons-material/MailOutline'
 import MenuBookIcon from '@mui/icons-material/MenuBook'
+import RocketLaunchIcon from '@mui/icons-material/RocketLaunch'
 import SettingsIcon from '@mui/icons-material/Settings'
 import ExpandLessIcon from '@mui/icons-material/ExpandLess'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
@@ -122,6 +123,12 @@ const TREE: NavNode[] = [
         label: 'Billing & Metering',
         path: 'platform/billing',
         Icon: ReceiptLongIcon,
+      },
+      {
+        kind: 'leaf',
+        label: 'Releases',
+        path: 'platform/releases',
+        Icon: RocketLaunchIcon,
       },
       {
         kind: 'leaf',

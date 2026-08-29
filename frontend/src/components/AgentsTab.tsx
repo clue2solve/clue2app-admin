@@ -33,6 +33,7 @@ import {
   Info,
 } from '@mui/icons-material'
 import { motion } from 'framer-motion'
+import { AGENT_DESCRIPTIONS } from './AgentDetailPage'
 
 // The Platform Agents backend runs as a Knative service in-cluster and
 // is reachable at the public URL below. We call it directly from the
@@ -594,6 +595,21 @@ function AgentsTab({ onOpenAgent }: AgentsTabProps = {}) {
                           >
                             {agent.type}
                           </Typography>
+                          {AGENT_DESCRIPTIONS[agent.name] && (
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              sx={{
+                                display: 'block',
+                                fontSize: '0.7rem',
+                                lineHeight: 1.35,
+                                mt: 0.5,
+                                maxWidth: 420,
+                              }}
+                            >
+                              {AGENT_DESCRIPTIONS[agent.name]}
+                            </Typography>
+                          )}
                         </TableCell>
                         <TableCell sx={tdSx}>
                           <Chip

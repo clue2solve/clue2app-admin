@@ -164,6 +164,45 @@ const SEVERITY_META: Record<
   info: { color: '#3b82f6', Icon: Info, label: 'info' },
 }
 
+// Short one-line description of what each agent actually does. Static
+// registry so the detail page has copy without a backend change. If a
+// name isn't listed here the header falls back to just "{type} · {name}"
+// (the pre-registry behavior). Also imported by AgentsTab for the list.
+export const AGENT_DESCRIPTIONS: Record<string, string> = {
+  'ecr-healer':
+    'Deletes ECR repositories for apps that no longer exist. Prevents unbounded image-storage growth from long-deleted apps.',
+  'disk-pressure':
+    'Watches EKS nodes for MemoryPressure/DiskPressure conditions and alerts before workloads get evicted.',
+  'node-scaler':
+    'Scales the EKS node group up when pods are Pending due to insufficient capacity.',
+  'builder-health':
+    'Watches kpack Build resources for wedged Succeeded=False states and prompts a retry (delete failed Build → rebuild annotation).',
+  'platform-health':
+    'Broad periodic health scan (secrets, service accounts, kpack drift) via core REST endpoints. Umbrella check for everything not covered by a dedicated agent.',
+  'cost-tracker':
+    'Persists per-service daily CCU + $ cost snapshots to the coordinator (cost_snapshots table). Drives the Billing tab.',
+  'git-creds-health':
+    'Scans control-namespace git-credential secrets (kpack PATs, GitHub App tokens) for expiration or SAML-SSO drift. Warns 14 days ahead of dead.',
+  'cert-health':
+    'Watches cert-manager Certificate resources for renewal failures on public app hostnames.',
+  'buildpack-stack':
+    'Monitors kpack ClusterStack + ClusterBuilder drift; alerts when base images fall behind upstream Paketo releases.',
+  'github-ratelimit':
+    'Watches GitHub API rate-limit headroom for our shared PATs so we notice throttling before builds stall.',
+  'postgres-health':
+    'Checks RDS reachability + connection-pool headroom from inside the cluster. Alerts when max_connections is close.',
+  'aws-iam-health':
+    'Validates that IAM roles + policies referenced by service accounts (IRSA + explicit-cred users) still exist and have required permissions.',
+  'llm-upstream':
+    'Monitors upstream LLM providers (OpenAI, Anthropic) for reachability, rate-limit headroom, and 5xx spikes from the gateway.',
+  'project-bootstrap-drift':
+    'Detects namespace/RBAC/ServiceAccount drift between what project bootstrap should have created and what actually exists.',
+  'build-repair':
+    'Auto-repairs specific known kpack build failure patterns (libatomic missing, node version pin, etc.). Watches then heals.',
+  'surface-drift':
+    'Detects when live cluster state has drifted from the declared config (like ArgoCD, but without ArgoCD).',
+}
+
 const severityMeta = (s?: string) =>
   SEVERITY_META[(s || '').toLowerCase()] || SEVERITY_META.info
 
@@ -702,6 +741,15 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
               <Typography variant="caption" color="text.secondary">
                 {agent.type} · {agent.name}
               </Typography>
+              {AGENT_DESCRIPTIONS[agent.name] && (
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ mt: 0.75, maxWidth: 780, lineHeight: 1.4 }}
+                >
+                  {AGENT_DESCRIPTIONS[agent.name]}
+                </Typography>
+              )}
             </Box>
             {backgroundRefetching && (
               <CircularProgress size={12} sx={{ mr: 1 }} />

@@ -1,0 +1,51 @@
+# SAST via Semgrep community rules. Runs on every PR + weekly on main.
+#
+# INFORMATIONAL-ONLY mode: findings surface in the Actions run log but
+# do not gate the PR (no --error). This lets the workflow merge across
+# repos with pre-existing legacy findings; the intended end-state is to
+# switch to baseline mode (--baseline-ref) once existing findings are
+# triaged, so only NEW findings block. See security-remediation memory
+# doc for the current triage list per repo.
+#
+# SOC 2 evidence: CC7 vulnerability management, S1 stage of the shift-
+# left scanning pipeline.
+
+name: security · semgrep
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 4 * * 1'  # weekly Monday 04:17 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: install semgrep
+        run: pip install --quiet semgrep
+      - name: run semgrep (informational)
+        env:
+          SEMGREP_TIMEOUT: '300'
+        # No --error: findings visible in the Actions log but don't
+        # gate the PR. Flip to --error (and add --baseline-ref) once
+        # the initial finding triage lands per repo.
+        run: |
+          semgrep --config=auto \
+                  --skip-unknown-extensions \
+                  --exclude=node_modules \
+                  --exclude=dist \
+                  --exclude=build \
+                  --exclude=vendor \
+                  --exclude=venv \
+                  --exclude=.venv \
+                  .

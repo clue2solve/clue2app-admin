@@ -115,9 +115,14 @@ const item = {
   show: { opacity: 1, y: 0 },
 }
 
-function formatUSD(n: number | null | undefined): string {
-  if (n === null || n === undefined || Number.isNaN(n)) return '—'
-  return n.toLocaleString('en-US', {
+function formatUSD(n: number | string | null | undefined): string {
+  if (n === null || n === undefined) return '—'
+  // Coerce: some cost endpoints stringify decimals to avoid float
+  // truncation. Number("12.5") is 12.5, Number("") is 0, Number("abc")
+  // is NaN — the isFinite guard covers the last case.
+  const v = typeof n === 'number' ? n : Number(n)
+  if (!Number.isFinite(v)) return '—'
+  return v.toLocaleString('en-US', {
     style: 'currency',
     currency: 'USD',
     minimumFractionDigits: 2,
@@ -289,7 +294,7 @@ function PlatformCostTab() {
                 <Typography variant="h4" fontWeight={700} sx={{ color: deltaColor }}>
                   {delta === null
                     ? '—'
-                    : `${delta > 0 ? '+' : ''}${delta.toFixed(2)}%`}
+                    : `${delta > 0 ? '+' : ''}${Number(delta ?? 0).toFixed(2)}%`}
                 </Typography>
                 {summary && (
                   <Tooltip title={summary.previous_month_to_date.note || ''}>
@@ -333,7 +338,11 @@ function PlatformCostTab() {
                   <XAxis dataKey="label" />
                   <YAxis
                     tickFormatter={(v: number) =>
-                      v >= 1000 ? `$${(v / 1000).toFixed(1)}k` : `$${v.toFixed(0)}`
+                      (() => {
+                        const n = Number(v ?? 0)
+                        if (!Number.isFinite(n)) return '$0'
+                        return n >= 1000 ? `$${(n / 1000).toFixed(1)}k` : `$${n.toFixed(0)}`
+                      })()
                     }
                   />
                   <RechartsTooltip
@@ -432,14 +441,14 @@ function PlatformCostTab() {
                           >
                             <Box
                               sx={{
-                                width: `${Math.min(100, s.pct_of_total)}%`,
+                                width: `${Math.min(100, Number(s.pct_of_total ?? 0))}%`,
                                 height: '100%',
                                 bgcolor: 'secondary.main',
                               }}
                             />
                           </Box>
                           <Typography variant="body2">
-                            {s.pct_of_total.toFixed(2)}%
+                            {Number(s.pct_of_total ?? 0).toFixed(2)}%
                           </Typography>
                         </Box>
                       </TableCell>
