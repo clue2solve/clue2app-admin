@@ -22,6 +22,7 @@ import {
   Stack,
   Divider,
   Button,
+  Snackbar,
 } from '@mui/material'
 import { motion } from 'framer-motion'
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
@@ -30,8 +31,10 @@ import CalendarMonthIcon from '@mui/icons-material/CalendarMonth'
 import TrendingUpIcon from '@mui/icons-material/TrendingUp'
 import TrendingDownIcon from '@mui/icons-material/TrendingDown'
 import TrendingFlatIcon from '@mui/icons-material/TrendingFlat'
+import CreditCardIcon from '@mui/icons-material/CreditCard'
 import { coordinatorGet, apiGet, ApiError } from '../api'
 import BillingTrendChart from './BillingTrendChart'
+import ConvertAccountDialog from './ConvertAccountDialog'
 import HistoricalRateChart from './HistoricalRateChart'
 
 // --- Cost Explorer API types (mirror admin backend /api/costs/* shapes; -----
@@ -531,6 +534,9 @@ function BillingTab() {
   const [period, setPeriod] = useState<Period>('mtd')
   const [drill, setDrill] = useState<DrillLevel>({ level: 'accounts' })
   const [accountFilter, setAccountFilter] = useState<AccountFilter>('all')
+  const [convertTarget, setConvertTarget] = useState<{ id: string; name: string } | null>(null)
+  const [convertToast, setConvertToast] = useState<{ accountId: string; auditId: string } | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
 
   const [summary, setSummary] = useState<BillingSummary | null>(null)
   const [accounts, setAccounts] = useState<AccountBilling[] | null>(null)
@@ -618,7 +624,7 @@ function BillingTab() {
     return () => {
       cancelled = true
     }
-  }, [drill, period])
+  }, [drill, period, reloadKey])
 
   const momMtd = formatMomPct(summary?.momPct)
 
@@ -793,12 +799,13 @@ function BillingTab() {
                       <TableCell align="right">MoM %</TableCell>
                       <TableCell align="right"># Projects</TableCell>
                       <TableCell align="right"># Apps</TableCell>
+                      <TableCell align="right">Actions</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
                     {(filteredAccounts || []).length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={8} align="center">
+                        <TableCell colSpan={9} align="center">
                           <Typography variant="body2" color="text.secondary" sx={{ py: 3 }}>
                             No accounts match this filter for this period.
                           </Typography>
@@ -875,6 +882,18 @@ function BillingTab() {
                             </TableCell>
                             <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>{a.projectCount}</TableCell>
                             <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>{a.appCount}</TableCell>
+                            <TableCell align="right" onClick={(e) => e.stopPropagation()}>
+                              {isTrialLike && (
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  startIcon={<CreditCardIcon fontSize="small" />}
+                                  onClick={() => setConvertTarget({ id: a.accountId, name: a.accountName })}
+                                >
+                                  Convert to Paid
+                                </Button>
+                              )}
+                            </TableCell>
                           </TableRow>
                         )
                       })}
@@ -1121,6 +1140,40 @@ function BillingTab() {
           </Card>
         </motion.div>
       )}
+
+      <ConvertAccountDialog
+        open={!!convertTarget}
+        accountId={convertTarget?.id ?? null}
+        accountName={convertTarget?.name ?? null}
+        onClose={() => setConvertTarget(null)}
+        onConverted={(res) => {
+          setConvertTarget(null)
+          setConvertToast({ accountId: res.accountId, auditId: res.auditId })
+          setReloadKey((k) => k + 1)
+        }}
+      />
+
+      <Snackbar
+        open={!!convertToast}
+        autoHideDuration={8000}
+        onClose={() => setConvertToast(null)}
+        message={convertToast ? 'Account converted to BILLING.' : undefined}
+        action={
+          convertToast ? (
+            <Link
+              component="button"
+              variant="body2"
+              sx={{ color: 'primary.light', fontWeight: 600 }}
+              onClick={() => {
+                window.open(`/admin/audits/account/${convertToast.accountId}`, '_blank')
+                setConvertToast(null)
+              }}
+            >
+              View audit
+            </Link>
+          ) : undefined
+        }
+      />
     </motion.div>
   )
 }

@@ -22,6 +22,9 @@ import {
   Alert,
   Tooltip,
   Stack,
+  ToggleButtonGroup,
+  ToggleButton,
+  Divider,
 } from '@mui/material'
 import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import CloseIcon from '@mui/icons-material/Close'
@@ -33,7 +36,10 @@ interface InvitationRecord {
   requestId: string | null
   email: string | null
   projectName: string | null
-  kind: string | null
+  kind: 'SOLO' | 'TRIAL_ACCOUNT' | 'BILLING_ACCOUNT' | null
+  accountName: string | null
+  maxProjects: number | null
+  billingInfoCaptured: boolean | null
   status: string | null
   trialStartOn: string | null
   trialEndOn: string | null
@@ -42,7 +48,7 @@ interface InvitationRecord {
   redeemedOn: string | null
 }
 
-interface SoloInviteResult {
+interface InviteResult {
   invitation: InvitationRecord
   code: string
   redemptionUrl: string
@@ -58,6 +64,19 @@ interface Page<T> {
 
 const STATUS_FILTERS = ['ALL', 'ISSUED', 'REDEEMED', 'EXPIRED', 'REVOKED'] as const
 type StatusFilter = (typeof STATUS_FILTERS)[number]
+
+const INVITE_TYPES = [
+  { value: 'SOLO', label: 'Solo trial' },
+  { value: 'TRIAL_ACCOUNT', label: 'Trial account' },
+  { value: 'BILLING_ACCOUNT', label: 'Billing account' },
+] as const
+type InviteType = (typeof INVITE_TYPES)[number]['value']
+
+const KIND_CHIP: Record<string, { label: string; color: 'default' | 'primary' | 'success' }> = {
+  SOLO: { label: 'SOLO', color: 'default' },
+  TRIAL_ACCOUNT: { label: 'TRIAL-ACCT', color: 'primary' },
+  BILLING_ACCOUNT: { label: 'BILLING-ACCT', color: 'success' },
+}
 
 function formatDate(iso: string | null): string {
   if (!iso) return '—'
@@ -91,16 +110,39 @@ function statusColor(status: string | null): 'default' | 'success' | 'warning' |
 const POLL_INTERVAL_MS = 60_000
 
 export default function InvitationsTab() {
-  // ---- form state ----
+  // ---- invite type ----
+  const [inviteType, setInviteType] = useState<InviteType>('SOLO')
+
+  // ---- shared form state ----
   const [email, setEmail] = useState('')
-  const [projectName, setProjectName] = useState('')
-  const [trialLengthDays, setTrialLengthDays] = useState('14')
   const [notes, setNotes] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
 
+  // ---- SOLO-only ----
+  const [projectName, setProjectName] = useState('')
+  const [trialLengthDaysSolo, setTrialLengthDaysSolo] = useState('14')
+
+  // ---- TRIAL_ACCOUNT / BILLING_ACCOUNT shared ----
+  const [accountName, setAccountName] = useState('')
+  const [maxProjects, setMaxProjects] = useState('3')
+
+  // ---- TRIAL_ACCOUNT-only ----
+  const [trialLengthDaysAccount, setTrialLengthDaysAccount] = useState('30')
+
+  // ---- BILLING_ACCOUNT-only (billing info block) ----
+  const [billingContactName, setBillingContactName] = useState('')
+  const [billingContactEmail, setBillingContactEmail] = useState('')
+  const [billingAddressLine1, setBillingAddressLine1] = useState('')
+  const [billingAddressCity, setBillingAddressCity] = useState('')
+  const [billingAddressRegion, setBillingAddressRegion] = useState('')
+  const [billingAddressPostalCode, setBillingAddressPostalCode] = useState('')
+  const [billingAddressCountry, setBillingAddressCountry] = useState('US')
+  const [taxId, setTaxId] = useState('')
+  const [poNumber, setPoNumber] = useState('')
+
   // ---- result dialog ----
-  const [result, setResult] = useState<SoloInviteResult | null>(null)
+  const [result, setResult] = useState<InviteResult | null>(null)
   const [copied, setCopied] = useState(false)
 
   // ---- list state ----
@@ -132,34 +174,135 @@ export default function InvitationsTab() {
     return () => clearInterval(t)
   }, [loadInvitations])
 
+  const resetForm = () => {
+    setEmail('')
+    setNotes('')
+    setProjectName('')
+    setTrialLengthDaysSolo('14')
+    setAccountName('')
+    setMaxProjects('3')
+    setTrialLengthDaysAccount('30')
+    setBillingContactName('')
+    setBillingContactEmail('')
+    setBillingAddressLine1('')
+    setBillingAddressCity('')
+    setBillingAddressRegion('')
+    setBillingAddressPostalCode('')
+    setBillingAddressCountry('US')
+    setTaxId('')
+    setPoNumber('')
+  }
+
   const handleSubmit = async () => {
     setFormError(null)
     if (!email.trim()) {
       setFormError('Email is required.')
       return
     }
-    const days = trialLengthDays.trim() === '' ? undefined : parseInt(trialLengthDays, 10)
-    if (days !== undefined && (Number.isNaN(days) || days <= 0)) {
-      setFormError('Trial length must be a positive number of days.')
+
+    if (inviteType === 'SOLO') {
+      const days = trialLengthDaysSolo.trim() === '' ? undefined : parseInt(trialLengthDaysSolo, 10)
+      if (days !== undefined && (Number.isNaN(days) || days <= 0)) {
+        setFormError('Trial length must be a positive number of days.')
+        return
+      }
+      setSubmitting(true)
+      try {
+        const res = await coordinatorPost<InviteResult>('/api/v1/invitations/solo', {
+          email: email.trim(),
+          projectName: projectName.trim() || undefined,
+          trialLengthDays: days,
+          notes: notes.trim() || undefined,
+        })
+        setResult(res)
+        resetForm()
+        loadInvitations()
+      } catch (e) {
+        setFormError((e as ApiError).message || 'Failed to create invitation.')
+      } finally {
+        setSubmitting(false)
+      }
+      return
+    }
+
+    if (inviteType === 'TRIAL_ACCOUNT') {
+      if (!accountName.trim()) {
+        setFormError('Account name is required.')
+        return
+      }
+      const days = parseInt(trialLengthDaysAccount, 10)
+      if (Number.isNaN(days) || days <= 0) {
+        setFormError('Trial length must be a positive number of days.')
+        return
+      }
+      const projects = parseInt(maxProjects, 10)
+      if (Number.isNaN(projects) || projects <= 0) {
+        setFormError('Max projects must be a positive number.')
+        return
+      }
+      setSubmitting(true)
+      try {
+        const res = await coordinatorPost<InviteResult>('/api/v1/invitations/trial-account', {
+          email: email.trim(),
+          accountName: accountName.trim(),
+          trialLengthDays: days,
+          maxProjects: projects,
+          notes: notes.trim() || undefined,
+        })
+        setResult(res)
+        resetForm()
+        loadInvitations()
+      } catch (e) {
+        setFormError((e as ApiError).message || 'Failed to create invitation.')
+      } finally {
+        setSubmitting(false)
+      }
+      return
+    }
+
+    // BILLING_ACCOUNT
+    if (!accountName.trim()) {
+      setFormError('Account name is required.')
+      return
+    }
+    if (!billingContactName.trim() || !billingContactEmail.trim()) {
+      setFormError('Billing contact name and email are required.')
+      return
+    }
+    if (!billingAddressLine1.trim() || !billingAddressCity.trim() || !billingAddressCountry.trim()) {
+      setFormError('Billing address (line 1, city, country) is required.')
+      return
+    }
+    const projects = parseInt(maxProjects, 10)
+    if (Number.isNaN(projects) || projects <= 0) {
+      setFormError('Max projects must be a positive number.')
       return
     }
     setSubmitting(true)
     try {
-      const res = await coordinatorPost<SoloInviteResult>('/api/v1/invitations/solo', {
+      const res = await coordinatorPost<InviteResult>('/api/v1/invitations/billing-account', {
         email: email.trim(),
-        projectName: projectName.trim() || undefined,
-        trialLengthDays: days,
+        accountName: accountName.trim(),
+        maxProjects: projects,
+        billingContactName: billingContactName.trim(),
+        billingContactEmail: billingContactEmail.trim(),
+        billingAddress: {
+          line1: billingAddressLine1.trim(),
+          city: billingAddressCity.trim(),
+          region: billingAddressRegion.trim() || undefined,
+          postalCode: billingAddressPostalCode.trim() || undefined,
+          country: billingAddressCountry.trim(),
+        },
+        taxId: taxId.trim() || undefined,
+        poNumber: poNumber.trim() || undefined,
+        paymentMethodId: null,
         notes: notes.trim() || undefined,
       })
       setResult(res)
-      setEmail('')
-      setProjectName('')
-      setTrialLengthDays('14')
-      setNotes('')
+      resetForm()
       loadInvitations()
     } catch (e) {
-      const err = e as ApiError
-      setFormError(err.message || 'Failed to create invitation.')
+      setFormError((e as ApiError).message || 'Failed to create invitation.')
     } finally {
       setSubmitting(false)
     }
@@ -190,6 +333,13 @@ export default function InvitationsTab() {
 
   const rows = invitations?.content ?? []
 
+  const formHint =
+    inviteType === 'SOLO'
+      ? 'Invite a single-project trial user. No email is sent — copy the redemption link and hand it to the invitee manually.'
+      : inviteType === 'TRIAL_ACCOUNT'
+        ? 'Invite an account admin who can create multiple projects under a trial account. No project is created up front — the invitee names their first project after redeeming.'
+        : 'Invite an account admin whose account starts directly on BILLING (no trial dates). Billing contact and address are required and stored for invoicing; card capture is a placeholder until Stripe (Phase-2) is wired in.'
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
@@ -199,15 +349,38 @@ export default function InvitationsTab() {
       <Box sx={{ mb: 2 }}>
         <Typography variant="h6" fontWeight={600}>Invitations</Typography>
         <Typography variant="body2" color="text.secondary">
-          Invite single-project trial users. No email is sent yet — copy the
-          redemption link and hand it to the invitee manually.
+          Issue one-shot redemption links for new users. Choose an invite type below.
         </Typography>
       </Box>
 
       <Paper variant="outlined" sx={{ p: 3, mb: 3, maxWidth: 640 }}>
         <Typography variant="subtitle1" fontWeight={600} sx={{ mb: 2 }}>
-          New solo invitation
+          New invitation
         </Typography>
+
+        <ToggleButtonGroup
+          size="small"
+          value={inviteType}
+          exclusive
+          onChange={(_e, next) => {
+            if (next) {
+              setInviteType(next)
+              setFormError(null)
+            }
+          }}
+          sx={{ mb: 2 }}
+        >
+          {INVITE_TYPES.map((t) => (
+            <ToggleButton key={t.value} value={t.value}>
+              {t.label}
+            </ToggleButton>
+          ))}
+        </ToggleButtonGroup>
+
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          {formHint}
+        </Typography>
+
         <Stack spacing={2}>
           <TextField
             label="Invitee email"
@@ -217,21 +390,148 @@ export default function InvitationsTab() {
             onChange={(e) => setEmail(e.target.value)}
             type="email"
           />
-          <TextField
-            label="Project name"
-            size="small"
-            placeholder="Defaults to a name derived from the email"
-            value={projectName}
-            onChange={(e) => setProjectName(e.target.value)}
-          />
-          <TextField
-            label="Trial length (days)"
-            size="small"
-            type="number"
-            value={trialLengthDays}
-            onChange={(e) => setTrialLengthDays(e.target.value)}
-            inputProps={{ min: 1 }}
-          />
+
+          {inviteType === 'SOLO' && (
+            <>
+              <TextField
+                label="Project name"
+                size="small"
+                placeholder="Defaults to a name derived from the email"
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+              />
+              <TextField
+                label="Trial length (days)"
+                size="small"
+                type="number"
+                value={trialLengthDaysSolo}
+                onChange={(e) => setTrialLengthDaysSolo(e.target.value)}
+                inputProps={{ min: 1 }}
+              />
+            </>
+          )}
+
+          {(inviteType === 'TRIAL_ACCOUNT' || inviteType === 'BILLING_ACCOUNT') && (
+            <>
+              <TextField
+                label="Account name"
+                size="small"
+                required
+                value={accountName}
+                onChange={(e) => setAccountName(e.target.value)}
+              />
+              <TextField
+                label="Max projects"
+                size="small"
+                type="number"
+                value={maxProjects}
+                onChange={(e) => setMaxProjects(e.target.value)}
+                inputProps={{ min: 1 }}
+              />
+            </>
+          )}
+
+          {inviteType === 'TRIAL_ACCOUNT' && (
+            <TextField
+              label="Trial length (days)"
+              size="small"
+              type="number"
+              value={trialLengthDaysAccount}
+              onChange={(e) => setTrialLengthDaysAccount(e.target.value)}
+              inputProps={{ min: 1 }}
+            />
+          )}
+
+          {inviteType === 'BILLING_ACCOUNT' && (
+            <>
+              <Divider textAlign="left">
+                <Typography variant="caption" color="text.secondary">Billing contact</Typography>
+              </Divider>
+              <TextField
+                label="Billing contact name"
+                size="small"
+                required
+                value={billingContactName}
+                onChange={(e) => setBillingContactName(e.target.value)}
+              />
+              <TextField
+                label="Billing contact email"
+                size="small"
+                required
+                type="email"
+                value={billingContactEmail}
+                onChange={(e) => setBillingContactEmail(e.target.value)}
+              />
+              <Divider textAlign="left">
+                <Typography variant="caption" color="text.secondary">Billing address</Typography>
+              </Divider>
+              <TextField
+                label="Address line 1"
+                size="small"
+                required
+                value={billingAddressLine1}
+                onChange={(e) => setBillingAddressLine1(e.target.value)}
+              />
+              <Stack direction="row" spacing={2}>
+                <TextField
+                  label="City"
+                  size="small"
+                  required
+                  fullWidth
+                  value={billingAddressCity}
+                  onChange={(e) => setBillingAddressCity(e.target.value)}
+                />
+                <TextField
+                  label="Region / State"
+                  size="small"
+                  fullWidth
+                  value={billingAddressRegion}
+                  onChange={(e) => setBillingAddressRegion(e.target.value)}
+                />
+              </Stack>
+              <Stack direction="row" spacing={2}>
+                <TextField
+                  label="Postal code"
+                  size="small"
+                  fullWidth
+                  value={billingAddressPostalCode}
+                  onChange={(e) => setBillingAddressPostalCode(e.target.value)}
+                />
+                <TextField
+                  label="Country"
+                  size="small"
+                  required
+                  fullWidth
+                  value={billingAddressCountry}
+                  onChange={(e) => setBillingAddressCountry(e.target.value)}
+                />
+              </Stack>
+              <Stack direction="row" spacing={2}>
+                <TextField
+                  label="Tax ID"
+                  size="small"
+                  fullWidth
+                  value={taxId}
+                  onChange={(e) => setTaxId(e.target.value)}
+                />
+                <TextField
+                  label="PO number"
+                  size="small"
+                  fullWidth
+                  value={poNumber}
+                  onChange={(e) => setPoNumber(e.target.value)}
+                />
+              </Stack>
+              <TextField
+                label="Payment method"
+                size="small"
+                disabled
+                placeholder="Stripe card capture — coming in Phase 2"
+                helperText="Not collected yet. Billing starts on invoice/PO until Stripe is wired in."
+              />
+            </>
+          )}
+
           <TextField
             label="Notes"
             size="small"
@@ -290,7 +590,8 @@ export default function InvitationsTab() {
               <TableHead>
                 <TableRow>
                   <TableCell>Email</TableCell>
-                  <TableCell>Project</TableCell>
+                  <TableCell>Kind</TableCell>
+                  <TableCell>Project / Account</TableCell>
                   <TableCell>Status</TableCell>
                   <TableCell>Trial ends</TableCell>
                   <TableCell>Issued</TableCell>
@@ -301,47 +602,60 @@ export default function InvitationsTab() {
               <TableBody>
                 {rows.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={7} align="center">
+                    <TableCell colSpan={8} align="center">
                       <Typography variant="body2" color="text.secondary" sx={{ py: 3 }}>
                         No invitations{statusFilter !== 'ALL' ? ` with status ${statusFilter}` : ''}.
                       </Typography>
                     </TableCell>
                   </TableRow>
                 )}
-                {rows.map((inv) => (
-                  <TableRow key={inv.id} hover>
-                    <TableCell>{inv.email || '—'}</TableCell>
-                    <TableCell>{inv.projectName || '—'}</TableCell>
-                    <TableCell>
-                      <Chip
-                        label={inv.status || 'UNKNOWN'}
-                        size="small"
-                        color={statusColor(inv.status)}
-                        variant="outlined"
-                      />
-                    </TableCell>
-                    <TableCell>{formatDate(inv.trialEndOn)}</TableCell>
-                    <TableCell>{formatDate(inv.issuedOn)}</TableCell>
-                    <TableCell>{formatDate(inv.expiresOn)}</TableCell>
-                    <TableCell align="right">
-                      <Stack direction="row" spacing={1} justifyContent="flex-end">
-                        <Tooltip title="Revoke">
-                          <span>
-                            <Button
-                              size="small"
-                              color="error"
-                              variant="outlined"
-                              disabled={inv.status !== 'ISSUED' || revokingId === inv.id}
-                              onClick={() => handleRevoke(inv.id)}
-                            >
-                              {revokingId === inv.id ? '…' : 'Revoke'}
-                            </Button>
-                          </span>
-                        </Tooltip>
-                      </Stack>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {rows.map((inv) => {
+                  const kind = KIND_CHIP[inv.kind || 'SOLO'] || KIND_CHIP.SOLO
+                  return (
+                    <TableRow key={inv.id} hover>
+                      <TableCell>{inv.email || '—'}</TableCell>
+                      <TableCell>
+                        <Chip label={kind.label} size="small" color={kind.color} variant="outlined" />
+                      </TableCell>
+                      <TableCell>
+                        {inv.kind === 'SOLO' ? (inv.projectName || '—') : (inv.accountName || '—')}
+                        {inv.maxProjects != null && (
+                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                            max {inv.maxProjects} projects
+                          </Typography>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Chip
+                          label={inv.status || 'UNKNOWN'}
+                          size="small"
+                          color={statusColor(inv.status)}
+                          variant="outlined"
+                        />
+                      </TableCell>
+                      <TableCell>{inv.kind === 'BILLING_ACCOUNT' ? '—' : formatDate(inv.trialEndOn)}</TableCell>
+                      <TableCell>{formatDate(inv.issuedOn)}</TableCell>
+                      <TableCell>{formatDate(inv.expiresOn)}</TableCell>
+                      <TableCell align="right">
+                        <Stack direction="row" spacing={1} justifyContent="flex-end">
+                          <Tooltip title="Revoke">
+                            <span>
+                              <Button
+                                size="small"
+                                color="error"
+                                variant="outlined"
+                                disabled={inv.status !== 'ISSUED' || revokingId === inv.id}
+                                onClick={() => handleRevoke(inv.id)}
+                              >
+                                {revokingId === inv.id ? '…' : 'Revoke'}
+                              </Button>
+                            </span>
+                          </Tooltip>
+                        </Stack>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
               </TableBody>
             </Table>
           </TableContainer>
@@ -398,6 +712,11 @@ export default function InvitationsTab() {
           {result?.invitation.trialEndOn && (
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
               Trial ends {formatDate(result.invitation.trialEndOn)}.
+            </Typography>
+          )}
+          {result?.invitation.billingInfoCaptured && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
+              Billing contact captured — account starts on BILLING immediately upon redemption.
             </Typography>
           )}
         </DialogContent>
