@@ -11,6 +11,7 @@ import {
   TableCell,
   TableContainer,
   TablePagination,
+  Checkbox,
   Chip,
   Button,
   TextField,
@@ -64,6 +65,20 @@ interface InvitationRecord {
   // rows stay compatible.
   target_account_name?: string | null
   target_project_name?: string | null
+  // SCK-628: BETA mint responses carry the feature flag id + display name
+  // so the result dialog can call out the feature the redeemer unlocks
+  // without a second round-trip. Optional — other kinds do not populate.
+  target_feature_flag_id?: string | null
+  target_feature_flag_name?: string | null
+  bootstrap_account?: boolean | null
+}
+
+// SCK-628: feature flag typeahead option for the BETA form. The lookup
+// endpoint returns only flags opted-in via availableAsBetaInvite=true.
+interface FeatureFlagOption {
+  id: string
+  name: string
+  description?: string | null
 }
 
 interface InviteResult {
@@ -108,19 +123,21 @@ const INVITE_TYPES = [
   { value: 'TRIAL_ACCOUNT', label: 'Trial account' },
   { value: 'BILLING_ACCOUNT', label: 'Billing account' },
   { value: 'PROJECT_MEMBER', label: 'Project member' },
+  { value: 'BETA', label: 'Beta' },
 ] as const
 type InviteType = (typeof INVITE_TYPES)[number]['value']
 
-const KIND_CHIP: Record<string, { label: string; color: 'default' | 'primary' | 'success' | 'info' }> = {
+const KIND_CHIP: Record<string, { label: string; color: 'default' | 'primary' | 'success' | 'info' | 'warning' }> = {
   SOLO: { label: 'SOLO', color: 'default' },
   TRIAL_ACCOUNT: { label: 'TRIAL-ACCT', color: 'primary' },
   BILLING_ACCOUNT: { label: 'BILLING-ACCT', color: 'success' },
   PROJECT_MEMBER: { label: 'PROJECT-MEMBER', color: 'info' },
+  BETA: { label: 'BETA', color: 'warning' },
 }
 
-// Kind filter for the list segment. Currently only PROJECT_MEMBER is worth
-// singling out (SCK-624 landing story); future stories add more.
-const KIND_FILTERS = ['ALL', 'PROJECT_MEMBER'] as const
+// Kind filter for the list segment. Grows one story at a time (SCK-624
+// added PROJECT_MEMBER, SCK-628 adds BETA).
+const KIND_FILTERS = ['ALL', 'PROJECT_MEMBER', 'BETA'] as const
 type KindFilter = (typeof KIND_FILTERS)[number]
 
 function formatDate(iso: string | null): string {
@@ -197,6 +214,14 @@ export default function InvitationsTab() {
   const [memberRole, setMemberRole] = useState<ProjectMemberRole>('CONTRIBUTOR')
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>('email')
 
+  // ---- BETA-only (SCK-628) ----
+  const [flagQuery, setFlagQuery] = useState('')
+  const [flagOptions, setFlagOptions] = useState<FeatureFlagOption[]>([])
+  const [flagSelected, setFlagSelected] = useState<FeatureFlagOption | null>(null)
+  const [flagLoading, setFlagLoading] = useState(false)
+  const [bootstrapAccount, setBootstrapAccount] = useState(false)
+  const [betaAccountName, setBetaAccountName] = useState('')
+
   // ---- result dialog ----
   const [result, setResult] = useState<InviteResult | null>(null)
   const [copied, setCopied] = useState(false)
@@ -253,6 +278,28 @@ export default function InvitationsTab() {
     }
   }, [inviteType, accountQuery])
 
+  // SCK-628: debounced feature-flag typeahead for the BETA form. Only fires
+  // while BETA is showing; scoped to flags opted-in with
+  // availableAsBetaInvite=true (SCK-627 backend).
+  useEffect(() => {
+    if (inviteType !== 'BETA') return
+    const q = flagQuery.trim()
+    setFlagLoading(true)
+    const handle = setTimeout(() => {
+      const qs = q ? `&q=${encodeURIComponent(q)}` : ''
+      coordinatorGet<FeatureFlagOption[]>(
+        `/api/v1/feature-flags?availableAsBetaInvite=true${qs}`,
+      )
+        .then((data) => setFlagOptions(Array.isArray(data) ? data : []))
+        .catch(() => setFlagOptions([]))
+        .finally(() => setFlagLoading(false))
+    }, 250)
+    return () => {
+      clearTimeout(handle)
+      setFlagLoading(false)
+    }
+  }, [inviteType, flagQuery])
+
   // Load projects whenever the selected account changes. Clears the picked
   // project so the operator can't submit a project that no longer belongs
   // to the account.
@@ -296,6 +343,11 @@ export default function InvitationsTab() {
     setProjectSelected(null)
     setMemberRole('CONTRIBUTOR')
     setDeliveryMode('email')
+    setFlagQuery('')
+    setFlagOptions([])
+    setFlagSelected(null)
+    setBootstrapAccount(false)
+    setBetaAccountName('')
   }
 
   const handleSubmit = async () => {
@@ -394,6 +446,49 @@ export default function InvitationsTab() {
       return
     }
 
+    if (inviteType === 'BETA') {
+      if (!flagSelected) {
+        setFormError('Feature flag is required.')
+        return
+      }
+      const trimmedName = betaAccountName.trim()
+      if (bootstrapAccount) {
+        // Match SoloStrategy contract: 3–63 chars, letters/digits/dash/underscore.
+        // Backend still authoritative — this is a fast-fail so the operator
+        // doesn't burn a round-trip on obvious typos.
+        if (!trimmedName) {
+          setFormError('Account name is required when bootstrapping an account.')
+          return
+        }
+        if (trimmedName.length < 3 || trimmedName.length > 63) {
+          setFormError('Account name must be 3–63 characters.')
+          return
+        }
+        if (!/^[A-Za-z0-9_-]+$/.test(trimmedName)) {
+          setFormError('Account name may contain only letters, digits, dashes, or underscores.')
+          return
+        }
+      }
+      setSubmitting(true)
+      try {
+        const res = await coordinatorPost<InviteResult>('/api/v1/invitations/beta', {
+          email: email.trim(),
+          targetFeatureFlagId: flagSelected.id,
+          bootstrapAccount,
+          accountName: bootstrapAccount ? trimmedName : undefined,
+          deliveryMode,
+        })
+        setResult(res)
+        resetForm()
+        loadInvitations()
+      } catch (e) {
+        setFormError((e as ApiError).message || 'Failed to create invitation.')
+      } finally {
+        setSubmitting(false)
+      }
+      return
+    }
+
     // BILLING_ACCOUNT
     if (!accountName.trim()) {
       setFormError('Account name is required.')
@@ -474,7 +569,9 @@ export default function InvitationsTab() {
         ? 'Invite an account admin who can create multiple projects under a trial account. No project is created up front — the invitee names their first project after redeeming.'
         : inviteType === 'BILLING_ACCOUNT'
           ? 'Invite an account admin whose account starts directly on BILLING (no trial dates). Billing contact and address are required and stored for invoicing; card capture is a placeholder until Stripe (Phase-2) is wired in.'
-          : 'Invite a user to an existing project. Pick the target account, then the project, then the role. Only SYSTEM users or an ACCOUNT_ADMIN of the target account can mint.'
+          : inviteType === 'PROJECT_MEMBER'
+            ? 'Invite a user to an existing project. Pick the target account, then the project, then the role. Only SYSTEM users or an ACCOUNT_ADMIN of the target account can mint.'
+            : 'Invite a user into a beta feature. Only feature flags opted in with availableAsBetaInvite=true appear here. Optionally bootstrap a fresh account for the redeemer.'
 
   return (
     <motion.div
@@ -763,6 +860,95 @@ export default function InvitationsTab() {
             </>
           )}
 
+          {inviteType === 'BETA' && (
+            <>
+              <Autocomplete<FeatureFlagOption>
+                size="small"
+                options={flagOptions}
+                loading={flagLoading}
+                value={flagSelected}
+                onChange={(_e, next) => setFlagSelected(next)}
+                inputValue={flagQuery}
+                onInputChange={(_e, next) => setFlagQuery(next)}
+                getOptionLabel={(o) => o.name || ''}
+                isOptionEqualToValue={(a, b) => a.id === b.id}
+                filterOptions={(x) => x}
+                renderOption={(props, opt) => (
+                  <li {...props} key={opt.id}>
+                    <Box>
+                      <Typography variant="body2">{opt.name}</Typography>
+                      {opt.description && (
+                        <Typography variant="caption" color="text.secondary">
+                          {opt.description}
+                        </Typography>
+                      )}
+                    </Box>
+                  </li>
+                )}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Beta feature"
+                    required
+                    placeholder="Type to search opt-in flags…"
+                    helperText="Only flags marked availableAsBetaInvite are eligible."
+                    InputProps={{
+                      ...params.InputProps,
+                      endAdornment: (
+                        <>
+                          {flagLoading ? <CircularProgress size={16} /> : null}
+                          {params.InputProps.endAdornment}
+                        </>
+                      ),
+                    }}
+                  />
+                )}
+              />
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={bootstrapAccount}
+                    onChange={(e) => setBootstrapAccount(e.target.checked)}
+                  />
+                }
+                label="Bootstrap a new account for this redeemer"
+              />
+              {bootstrapAccount && (
+                <TextField
+                  label="Account name"
+                  size="small"
+                  required
+                  value={betaAccountName}
+                  onChange={(e) => setBetaAccountName(e.target.value)}
+                  helperText="3–63 chars; letters, digits, dashes, underscores."
+                />
+              )}
+              <Box>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                  Delivery
+                </Typography>
+                <RadioGroup
+                  row
+                  value={deliveryMode}
+                  onChange={(e) => setDeliveryMode(e.target.value as DeliveryMode)}
+                  aria-label="Delivery mode"
+                >
+                  <FormControlLabel
+                    value="email"
+                    control={<Radio size="small" />}
+                    label="Email the invitee"
+                  />
+                  <FormControlLabel
+                    value="copy_only"
+                    control={<Radio size="small" />}
+                    label="Copy link only (no email)"
+                  />
+                </RadioGroup>
+              </Box>
+            </>
+          )}
+
           <TextField
             label="Notes"
             size="small"
@@ -870,12 +1056,19 @@ export default function InvitationsTab() {
                       <TableCell>
                         {inv.kind === 'PROJECT_MEMBER'
                           ? `${inv.target_account_name || inv.accountName || '—'} / ${inv.target_project_name || inv.projectName || '—'}`
-                          : inv.kind === 'SOLO'
-                            ? (inv.projectName || '—')
-                            : (inv.accountName || '—')}
+                          : inv.kind === 'BETA'
+                            ? (inv.target_feature_flag_name || 'beta feature')
+                            : inv.kind === 'SOLO'
+                              ? (inv.projectName || '—')
+                              : (inv.accountName || '—')}
                         {inv.maxProjects != null && (
                           <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                             max {inv.maxProjects} projects
+                          </Typography>
+                        )}
+                        {inv.kind === 'BETA' && inv.bootstrap_account && inv.accountName && (
+                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                            bootstraps {inv.accountName}
                           </Typography>
                         )}
                       </TableCell>
@@ -888,7 +1081,9 @@ export default function InvitationsTab() {
                         />
                       </TableCell>
                       <TableCell>
-                        {inv.kind === 'BILLING_ACCOUNT' || inv.kind === 'PROJECT_MEMBER'
+                        {inv.kind === 'BILLING_ACCOUNT'
+                          || inv.kind === 'PROJECT_MEMBER'
+                          || inv.kind === 'BETA'
                           ? '—'
                           : formatDate(inv.trialEndOn)}
                       </TableCell>
@@ -946,6 +1141,19 @@ export default function InvitationsTab() {
               Invited <strong>{result?.invitation.email}</strong> to{' '}
               <strong>{result?.invitation.target_project_name || result?.invitation.projectName || 'project'}</strong>{' '}
               in <strong>{result?.invitation.target_account_name || result?.invitation.accountName || 'account'}</strong>.
+            </Alert>
+          )}
+          {result?.invitation.kind === 'BETA' && (
+            <Alert severity="success" sx={{ mb: 2 }}>
+              Invited <strong>{result?.invitation.email}</strong> — on redemption they will unlock{' '}
+              <strong>{result?.invitation.target_feature_flag_name || 'the selected beta feature'}</strong>
+              {result?.invitation.bootstrap_account && result?.invitation.accountName ? (
+                <>
+                  {' '}and a fresh account named{' '}
+                  <strong>{result.invitation.accountName}</strong> will be provisioned.
+                </>
+              ) : null}
+              .
             </Alert>
           )}
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
