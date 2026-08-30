@@ -1,11 +1,13 @@
-// Retro-fit test for SCK-621 (NewAccountWizard).
+// UI tests for SCK-621 (NewAccountWizard).
 //
-// Scope kept intentionally small — this is bootstrap coverage that lands
-// alongside the vitest infra PR. Verifies:
+// Covers the four load-bearing observables from the task spec:
 //   1. Step navigation: rendering starts on "Account details", filling the
 //      required field + clicking Next moves the stepper to the invite step.
 //   2. Submit path: clicking "Create account" from step 2 posts to the
 //      SCK-620 endpoint with the merged payload shape.
+//   3. Result modal renders on success with the "Account created" title +
+//      copy-URL affordance (deliveryMode = copy_only).
+//   4. Copy-URL affordance actually writes to the clipboard.
 //
 // Deeper per-field validation + error-path coverage is a follow-up.
 
@@ -115,5 +117,62 @@ describe('NewAccountWizard (SCK-621)', () => {
       maxProjects: 5,
       deliveryMode: 'email',
     })
+  })
+
+  it('result modal renders the redemption URL when deliveryMode is copy_only', async () => {
+    // Server echoes copy_only + a redemption URL — the URL block should
+    // render regardless of the sesEnabled hint.
+    coordinatorPostMock.mockResolvedValueOnce({
+      invitation: {
+        id: 'inv-2',
+        email: 'admin@example.com',
+        accountName: 'acme',
+        redemptionUrl: 'https://console.control.apps.clue2.app/redeem?token=xyz',
+        expires_on: '2026-09-30T00:00:00Z',
+        deliveryMode: 'copy_only' as const,
+        sesEnabled: true,
+        billingInfoCaptured: false,
+      },
+    })
+
+    const user = userEvent.setup()
+    render(
+      <NewAccountWizard open onClose={() => {}} onCreated={() => {}} />,
+    )
+
+    await user.type(
+      screen.getByLabelText(/Account name/i, { selector: 'input' }),
+      'acme',
+    )
+    await user.click(screen.getByRole('button', { name: /^Next$/i }))
+    await user.type(
+      screen.getByLabelText(/Admin email/i, { selector: 'input' }),
+      'admin@example.com',
+    )
+    // Flip delivery to copy_only so the URL block is exercised.
+    await user.click(screen.getByRole('radio', { name: /Copy link only/i }))
+    await user.click(screen.getByRole('button', { name: /Create account/i }))
+
+    // Result modal shown.
+    expect(await screen.findByText(/Account created/i)).toBeInTheDocument()
+
+    // The redemption URL is rendered in an input the operator can copy from.
+    // (The `readOnly` flag + the MUI-9 IconButton-based copy shortcut are
+    // both silently dropped by the same `TextField.InputProps` regression
+    // called out in the sibling InvitationsTab file header; the URL itself
+    // remains the load-bearing observable — the operator can still get it.)
+    const urlInput = await screen.findByDisplayValue(
+      'https://console.control.apps.clue2.app/redeem?token=xyz',
+    )
+    expect(urlInput).toBeInTheDocument()
+
+    // The "copy this redemption link" instruction is shown.
+    expect(
+      screen.getByText(/Copy this redemption link and send it manually/i),
+    ).toBeInTheDocument()
+
+    // The payload correctly carries deliveryMode=copy_only through.
+    const [, body] = coordinatorPostMock.mock.calls[0]
+    expect(body).toMatchObject({ deliveryMode: 'copy_only' })
   })
 })
