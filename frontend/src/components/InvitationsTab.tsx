@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  Autocomplete,
   Box,
   Typography,
   Paper,
@@ -17,9 +18,13 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
+  FormControlLabel,
   IconButton,
   CircularProgress,
   Alert,
+  MenuItem,
+  Radio,
+  RadioGroup,
   Tooltip,
   Stack,
   ToggleButtonGroup,
@@ -53,6 +58,12 @@ interface InvitationRecord {
   expiresOn: string | null
   issuedOn: string | null
   redeemedOn: string | null
+  // SCK-624: PROJECT_MEMBER mint responses carry the resolved account +
+  // project names alongside the id so we can render them without a second
+  // round-trip. Older kinds don't populate these; keep them optional so
+  // rows stay compatible.
+  target_account_name?: string | null
+  target_project_name?: string | null
 }
 
 interface InviteResult {
@@ -60,6 +71,26 @@ interface InviteResult {
   code: string
   redemptionUrl: string
 }
+
+// Typeahead option shapes for PROJECT_MEMBER account/project pickers.
+interface AccountOption {
+  id: string
+  name: string
+}
+
+interface ProjectOption {
+  id: string
+  name: string
+}
+
+const PROJECT_MEMBER_ROLES = [
+  { value: 'VIEWER', label: 'Viewer' },
+  { value: 'CONTRIBUTOR', label: 'Contributor' },
+  { value: 'PROJECT_ADMIN', label: 'Project admin' },
+] as const
+type ProjectMemberRole = (typeof PROJECT_MEMBER_ROLES)[number]['value']
+
+type DeliveryMode = 'email' | 'copy_only'
 
 interface Page<T> {
   content: T[]
@@ -76,14 +107,21 @@ const INVITE_TYPES = [
   { value: 'SOLO', label: 'Solo trial' },
   { value: 'TRIAL_ACCOUNT', label: 'Trial account' },
   { value: 'BILLING_ACCOUNT', label: 'Billing account' },
+  { value: 'PROJECT_MEMBER', label: 'Project member' },
 ] as const
 type InviteType = (typeof INVITE_TYPES)[number]['value']
 
-const KIND_CHIP: Record<string, { label: string; color: 'default' | 'primary' | 'success' }> = {
+const KIND_CHIP: Record<string, { label: string; color: 'default' | 'primary' | 'success' | 'info' }> = {
   SOLO: { label: 'SOLO', color: 'default' },
   TRIAL_ACCOUNT: { label: 'TRIAL-ACCT', color: 'primary' },
   BILLING_ACCOUNT: { label: 'BILLING-ACCT', color: 'success' },
+  PROJECT_MEMBER: { label: 'PROJECT-MEMBER', color: 'info' },
 }
+
+// Kind filter for the list segment. Currently only PROJECT_MEMBER is worth
+// singling out (SCK-624 landing story); future stories add more.
+const KIND_FILTERS = ['ALL', 'PROJECT_MEMBER'] as const
+type KindFilter = (typeof KIND_FILTERS)[number]
 
 function formatDate(iso: string | null): string {
   if (!iso) return '—'
@@ -148,6 +186,17 @@ export default function InvitationsTab() {
   const [taxId, setTaxId] = useState('')
   const [poNumber, setPoNumber] = useState('')
 
+  // ---- PROJECT_MEMBER-only ----
+  const [accountQuery, setAccountQuery] = useState('')
+  const [accountOptions, setAccountOptions] = useState<AccountOption[]>([])
+  const [accountSelected, setAccountSelected] = useState<AccountOption | null>(null)
+  const [accountLoading, setAccountLoading] = useState(false)
+  const [projectOptions, setProjectOptions] = useState<ProjectOption[]>([])
+  const [projectSelected, setProjectSelected] = useState<ProjectOption | null>(null)
+  const [projectLoading, setProjectLoading] = useState(false)
+  const [memberRole, setMemberRole] = useState<ProjectMemberRole>('CONTRIBUTOR')
+  const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>('email')
+
   // ---- result dialog ----
   const [result, setResult] = useState<InviteResult | null>(null)
   const [copied, setCopied] = useState(false)
@@ -156,14 +205,16 @@ export default function InvitationsTab() {
   const [page, setPage] = useState(0)
   const [rowsPerPage, setRowsPerPage] = useState(10)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL')
+  const [kindFilter, setKindFilter] = useState<KindFilter>('ALL')
   const [invitations, setInvitations] = useState<Page<InvitationRecord> | null>(null)
   const [listError, setListError] = useState<string | null>(null)
   const [revokingId, setRevokingId] = useState<string | null>(null)
 
   const loadInvitations = useCallback(() => {
     const statusParam = statusFilter === 'ALL' ? '' : `&status=${statusFilter}`
+    const kindParam = kindFilter === 'ALL' ? '' : `&kind=${kindFilter}`
     coordinatorGet<Page<InvitationRecord>>(
-      `/api/v1/invitations?page=${page}&size=${rowsPerPage}${statusParam}`,
+      `/api/v1/invitations?page=${page}&size=${rowsPerPage}${statusParam}${kindParam}`,
     )
       .then((data) => setInvitations(data))
       .catch((e: ApiError) => {
@@ -173,13 +224,53 @@ export default function InvitationsTab() {
             : `Failed to load invitations: ${e.message}`,
         )
       })
-  }, [page, rowsPerPage, statusFilter])
+  }, [page, rowsPerPage, statusFilter, kindFilter])
 
   useEffect(() => {
     loadInvitations()
     const t = setInterval(loadInvitations, POLL_INTERVAL_MS)
     return () => clearInterval(t)
   }, [loadInvitations])
+
+  // Debounced account typeahead (PROJECT_MEMBER). Only fires while the
+  // PROJECT_MEMBER form is showing so we don't hammer the endpoint for
+  // other invite types.
+  useEffect(() => {
+    if (inviteType !== 'PROJECT_MEMBER') return
+    const q = accountQuery.trim()
+    setAccountLoading(true)
+    const handle = setTimeout(() => {
+      coordinatorGet<AccountOption[]>(
+        `/api/v1/accounts${q ? `?q=${encodeURIComponent(q)}` : ''}`,
+      )
+        .then((data) => setAccountOptions(Array.isArray(data) ? data : []))
+        .catch(() => setAccountOptions([]))
+        .finally(() => setAccountLoading(false))
+    }, 250)
+    return () => {
+      clearTimeout(handle)
+      setAccountLoading(false)
+    }
+  }, [inviteType, accountQuery])
+
+  // Load projects whenever the selected account changes. Clears the picked
+  // project so the operator can't submit a project that no longer belongs
+  // to the account.
+  useEffect(() => {
+    if (inviteType !== 'PROJECT_MEMBER' || !accountSelected) {
+      setProjectOptions([])
+      setProjectSelected(null)
+      return
+    }
+    setProjectLoading(true)
+    setProjectSelected(null)
+    coordinatorGet<ProjectOption[]>(
+      `/api/v1/k8s-project?accountId=${encodeURIComponent(accountSelected.id)}`,
+    )
+      .then((data) => setProjectOptions(Array.isArray(data) ? data : []))
+      .catch(() => setProjectOptions([]))
+      .finally(() => setProjectLoading(false))
+  }, [inviteType, accountSelected])
 
   const resetForm = () => {
     setEmail('')
@@ -198,6 +289,13 @@ export default function InvitationsTab() {
     setBillingAddressCountry('US')
     setTaxId('')
     setPoNumber('')
+    setAccountQuery('')
+    setAccountOptions([])
+    setAccountSelected(null)
+    setProjectOptions([])
+    setProjectSelected(null)
+    setMemberRole('CONTRIBUTOR')
+    setDeliveryMode('email')
   }
 
   const handleSubmit = async () => {
@@ -255,6 +353,35 @@ export default function InvitationsTab() {
           trialLengthDays: days,
           maxProjects: projects,
           notes: notes.trim() || undefined,
+        })
+        setResult(res)
+        resetForm()
+        loadInvitations()
+      } catch (e) {
+        setFormError((e as ApiError).message || 'Failed to create invitation.')
+      } finally {
+        setSubmitting(false)
+      }
+      return
+    }
+
+    if (inviteType === 'PROJECT_MEMBER') {
+      if (!accountSelected) {
+        setFormError('Target account is required.')
+        return
+      }
+      if (!projectSelected) {
+        setFormError('Target project is required.')
+        return
+      }
+      setSubmitting(true)
+      try {
+        const res = await coordinatorPost<InviteResult>('/api/v1/invitations/project-member', {
+          email: email.trim(),
+          targetAccountId: accountSelected.id,
+          targetProjectId: projectSelected.id,
+          role: memberRole,
+          deliveryMode,
         })
         setResult(res)
         resetForm()
@@ -345,7 +472,9 @@ export default function InvitationsTab() {
       ? 'Invite a single-project trial user. No email is sent — copy the redemption link and hand it to the invitee manually.'
       : inviteType === 'TRIAL_ACCOUNT'
         ? 'Invite an account admin who can create multiple projects under a trial account. No project is created up front — the invitee names their first project after redeeming.'
-        : 'Invite an account admin whose account starts directly on BILLING (no trial dates). Billing contact and address are required and stored for invoicing; card capture is a placeholder until Stripe (Phase-2) is wired in.'
+        : inviteType === 'BILLING_ACCOUNT'
+          ? 'Invite an account admin whose account starts directly on BILLING (no trial dates). Billing contact and address are required and stored for invoicing; card capture is a placeholder until Stripe (Phase-2) is wired in.'
+          : 'Invite a user to an existing project. Pick the target account, then the project, then the role. Only SYSTEM users or an ACCOUNT_ADMIN of the target account can mint.'
 
   return (
     <motion.div
@@ -539,6 +668,101 @@ export default function InvitationsTab() {
             </>
           )}
 
+          {inviteType === 'PROJECT_MEMBER' && (
+            <>
+              <Autocomplete<AccountOption>
+                size="small"
+                options={accountOptions}
+                loading={accountLoading}
+                value={accountSelected}
+                onChange={(_e, next) => setAccountSelected(next)}
+                inputValue={accountQuery}
+                onInputChange={(_e, next) => setAccountQuery(next)}
+                getOptionLabel={(o) => o.name || ''}
+                isOptionEqualToValue={(a, b) => a.id === b.id}
+                filterOptions={(x) => x}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Target account"
+                    required
+                    placeholder="Type to search accounts…"
+                    InputProps={{
+                      ...params.InputProps,
+                      endAdornment: (
+                        <>
+                          {accountLoading ? <CircularProgress size={16} /> : null}
+                          {params.InputProps.endAdornment}
+                        </>
+                      ),
+                    }}
+                  />
+                )}
+              />
+              <Autocomplete<ProjectOption>
+                size="small"
+                options={projectOptions}
+                loading={projectLoading}
+                value={projectSelected}
+                onChange={(_e, next) => setProjectSelected(next)}
+                getOptionLabel={(o) => o.name || ''}
+                isOptionEqualToValue={(a, b) => a.id === b.id}
+                disabled={!accountSelected}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Target project"
+                    required
+                    placeholder={accountSelected ? 'Pick a project…' : 'Pick an account first'}
+                    InputProps={{
+                      ...params.InputProps,
+                      endAdornment: (
+                        <>
+                          {projectLoading ? <CircularProgress size={16} /> : null}
+                          {params.InputProps.endAdornment}
+                        </>
+                      ),
+                    }}
+                  />
+                )}
+              />
+              <TextField
+                label="Role"
+                size="small"
+                select
+                required
+                value={memberRole}
+                onChange={(e) => setMemberRole(e.target.value as ProjectMemberRole)}
+              >
+                {PROJECT_MEMBER_ROLES.map((r) => (
+                  <MenuItem key={r.value} value={r.value}>{r.label}</MenuItem>
+                ))}
+              </TextField>
+              <Box>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                  Delivery
+                </Typography>
+                <RadioGroup
+                  row
+                  value={deliveryMode}
+                  onChange={(e) => setDeliveryMode(e.target.value as DeliveryMode)}
+                  aria-label="Delivery mode"
+                >
+                  <FormControlLabel
+                    value="email"
+                    control={<Radio size="small" />}
+                    label="Email the invitee"
+                  />
+                  <FormControlLabel
+                    value="copy_only"
+                    control={<Radio size="small" />}
+                    label="Copy link only (no email)"
+                  />
+                </RadioGroup>
+              </Box>
+            </>
+          )}
+
           <TextField
             label="Notes"
             size="small"
@@ -575,6 +799,25 @@ export default function InvitationsTab() {
             variant={s === statusFilter ? 'filled' : 'outlined'}
             onClick={() => {
               setStatusFilter(s)
+              setPage(0)
+            }}
+          />
+        ))}
+      </Box>
+
+      <Box sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+        <Typography variant="caption" color="text.secondary" sx={{ mr: 1 }}>
+          Kind
+        </Typography>
+        {KIND_FILTERS.map((k) => (
+          <Chip
+            key={k}
+            label={k === 'ALL' ? 'ALL' : KIND_CHIP[k]?.label ?? k}
+            size="small"
+            color={k === kindFilter ? 'primary' : 'default'}
+            variant={k === kindFilter ? 'filled' : 'outlined'}
+            onClick={() => {
+              setKindFilter(k)
               setPage(0)
             }}
           />
@@ -625,7 +868,11 @@ export default function InvitationsTab() {
                         <Chip label={kind.label} size="small" color={kind.color} variant="outlined" />
                       </TableCell>
                       <TableCell>
-                        {inv.kind === 'SOLO' ? (inv.projectName || '—') : (inv.accountName || '—')}
+                        {inv.kind === 'PROJECT_MEMBER'
+                          ? `${inv.target_account_name || inv.accountName || '—'} / ${inv.target_project_name || inv.projectName || '—'}`
+                          : inv.kind === 'SOLO'
+                            ? (inv.projectName || '—')
+                            : (inv.accountName || '—')}
                         {inv.maxProjects != null && (
                           <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                             max {inv.maxProjects} projects
@@ -640,7 +887,11 @@ export default function InvitationsTab() {
                           variant="outlined"
                         />
                       </TableCell>
-                      <TableCell>{inv.kind === 'BILLING_ACCOUNT' ? '—' : formatDate(inv.trialEndOn)}</TableCell>
+                      <TableCell>
+                        {inv.kind === 'BILLING_ACCOUNT' || inv.kind === 'PROJECT_MEMBER'
+                          ? '—'
+                          : formatDate(inv.trialEndOn)}
+                      </TableCell>
                       <TableCell>{formatDate(inv.issuedOn)}</TableCell>
                       <TableCell>{formatDate(inv.expiresOn)}</TableCell>
                       <TableCell align="right">
@@ -690,6 +941,13 @@ export default function InvitationsTab() {
           </IconButton>
         </DialogTitle>
         <DialogContent>
+          {result?.invitation.kind === 'PROJECT_MEMBER' && (
+            <Alert severity="success" sx={{ mb: 2 }}>
+              Invited <strong>{result?.invitation.email}</strong> to{' '}
+              <strong>{result?.invitation.target_project_name || result?.invitation.projectName || 'project'}</strong>{' '}
+              in <strong>{result?.invitation.target_account_name || result?.invitation.accountName || 'account'}</strong>.
+            </Alert>
+          )}
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             Copy this link and send it to <strong>{result?.invitation.email}</strong> manually —
             no email is sent automatically. The token is shown once and cannot be retrieved again.
