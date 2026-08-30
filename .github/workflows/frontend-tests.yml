@@ -1,0 +1,42 @@
+# Vitest run for the admin frontend.
+#
+# Scope: `frontend/`. Bootstrapped alongside SCK-621 / SCK-624 / SCK-628
+# retro-fit tests so the admin UI finally has automated coverage. Runs on
+# every PR + push to main. Path-filtered so backend-only PRs don't spin up
+# a Node runtime for nothing.
+
+name: frontend · tests
+
+on:
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  vitest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: install deps
+        run: npm ci
+      - name: run vitest
+        run: npm test
