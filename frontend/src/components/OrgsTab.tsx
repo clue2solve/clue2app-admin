@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   Box,
   Typography,
@@ -14,10 +14,13 @@ import {
   Alert,
   TextField,
   InputAdornment,
+  Button,
 } from '@mui/material'
 import SearchIcon from '@mui/icons-material/Search'
+import AddIcon from '@mui/icons-material/Add'
 import { motion } from 'framer-motion'
 import { coordinatorGet, ApiError } from '../api'
+import NewAccountWizard, { AccountAdminInvitationResult } from './NewAccountWizard'
 
 interface Org {
   id: string
@@ -53,19 +56,31 @@ export default function OrgsTab() {
   const [orgs, setOrgs] = useState<Org[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [q, setQ] = useState('')
+  const [wizardOpen, setWizardOpen] = useState(false)
+  const [flash, setFlash] = useState<string | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
+  const loadOrgs = useCallback(() => {
+    setErr(null)
     coordinatorGet<Org[]>('/api/accounts')
-      .then((data) => { if (!cancelled) setOrgs(data) })
+      .then((data) => setOrgs(data))
       .catch((e: ApiError) => {
-        if (cancelled) return
         setErr(e.status === 403
           ? 'SYSTEM privileges required to view all orgs.'
           : `Failed to load orgs: ${e.message}`)
       })
-    return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    loadOrgs()
+  }, [loadOrgs])
+
+  const handleCreated = (r: AccountAdminInvitationResult) => {
+    const name = r.invitation.accountName || 'account'
+    setFlash(`Account "${name}" created. Refreshing…`)
+    loadOrgs()
+    // Fade the flash after a few seconds; the row will show up in the table.
+    setTimeout(() => setFlash(null), 5000)
+  }
 
   const filtered = orgs?.filter((o) =>
     !q ||
@@ -80,11 +95,20 @@ export default function OrgsTab() {
     >
       <Box sx={{ mb: 2, display: 'flex', alignItems: 'baseline', gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h6" fontWeight={600}>Orgs</Typography>
-        <Typography variant="body2" color="text.secondary">
-          Cross-tenant list of accounts on the platform. Read-only. CRUD stays in console (ACCOUNT_ADMIN) or lands here as follow-up work (invitations).
+        <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1 }}>
+          Cross-tenant list of accounts on the platform. Read-only, plus SYSTEM-only new-account bootstrap.
         </Typography>
+        <Button
+          variant="contained"
+          size="small"
+          startIcon={<AddIcon />}
+          onClick={() => setWizardOpen(true)}
+        >
+          New account
+        </Button>
       </Box>
 
+      {flash && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setFlash(null)}>{flash}</Alert>}
       {err && <Alert severity="error" sx={{ mb: 2 }}>{err}</Alert>}
 
       {!orgs && !err && (
@@ -164,6 +188,12 @@ export default function OrgsTab() {
           </Typography>
         </>
       )}
+
+      <NewAccountWizard
+        open={wizardOpen}
+        onClose={() => setWizardOpen(false)}
+        onCreated={handleCreated}
+      />
     </motion.div>
   )
 }
