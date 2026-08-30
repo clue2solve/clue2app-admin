@@ -30,13 +30,20 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import CloseIcon from '@mui/icons-material/Close'
 import { motion } from 'framer-motion'
 import { coordinatorGet, coordinatorPost, ApiError } from '../api'
+import { InvitationKind } from '../types/invitations'
+
+// `kind` on server-returned records may still carry legacy DB values
+// (SCK-620 rename in flight). Widen the shared enum with the legacy
+// literals so historical rows keep type-checking during the transition;
+// once the rename lands the legacy arm drops.
+type InvitationRecordKind = InvitationKind | 'TRIAL_ACCOUNT' | 'BILLING_ACCOUNT'
 
 interface InvitationRecord {
   id: string
   requestId: string | null
   email: string | null
   projectName: string | null
-  kind: 'SOLO' | 'TRIAL_ACCOUNT' | 'BILLING_ACCOUNT' | null
+  kind: InvitationRecordKind | null
   accountName: string | null
   maxProjects: number | null
   billingInfoCaptured: boolean | null
