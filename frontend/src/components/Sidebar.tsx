@@ -161,6 +161,15 @@ const TREE: NavNode[] = [
         Icon: LanguageIcon,
       },
       {
+        // SCK-632 — SYSTEM-only LLM spend dashboard. Sits under
+        // Platform (peer of Billing / Cost) since it's about the
+        // shared LLM gateway spend across all accounts.
+        kind: 'leaf',
+        label: 'LLM Spend',
+        path: 'system/llm/spend',
+        Icon: SmartToyIcon,
+      },
+      {
         kind: 'parent',
         label: 'Directory',
         path: '',
