@@ -15,12 +15,12 @@ import {
   TextField,
   InputAdornment,
   Button,
+  Link as MuiLink,
 } from '@mui/material'
 import SearchIcon from '@mui/icons-material/Search'
-import AddIcon from '@mui/icons-material/Add'
+import LaunchIcon from '@mui/icons-material/Launch'
 import { motion } from 'framer-motion'
 import { coordinatorGet, ApiError } from '../api'
-import NewAccountWizard, { AccountAdminInvitationResult } from './NewAccountWizard'
 
 interface Org {
   id: string
@@ -31,6 +31,8 @@ interface Org {
   trialEndOn: string | null
   createdOn: string | null
 }
+
+const CONSOLE_ACCOUNTS_URL = 'https://console.clue2.app/directory/accounts'
 
 function formatDate(iso: string | null): string {
   if (!iso) return '—'
@@ -52,12 +54,20 @@ function trialStatus(o: Org): { label: string; color: 'default' | 'success' | 'w
   return { label: `Trial · ${daysLeft}d left`, color: daysLeft <= 7 ? 'warning' : 'default' }
 }
 
+/**
+ * OrgsTab — read-only after PR-2.
+ *
+ * The "+ New account" button and the NewAccountWizard were removed
+ * here because account creation now lives on the main console at
+ * /directory/accounts. This tab is preserved as a cross-tenant
+ * lookup surface until the full admin-app retirement (much later).
+ * Any operator hitting the visible banner is one click from the
+ * canonical CTA.
+ */
 export default function OrgsTab() {
   const [orgs, setOrgs] = useState<Org[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [q, setQ] = useState('')
-  const [wizardOpen, setWizardOpen] = useState(false)
-  const [flash, setFlash] = useState<string | null>(null)
 
   const loadOrgs = useCallback(() => {
     setErr(null)
@@ -74,14 +84,6 @@ export default function OrgsTab() {
     loadOrgs()
   }, [loadOrgs])
 
-  const handleCreated = (r: AccountAdminInvitationResult) => {
-    const name = r.invitation.accountName || 'account'
-    setFlash(`Account "${name}" created. Refreshing…`)
-    loadOrgs()
-    // Fade the flash after a few seconds; the row will show up in the table.
-    setTimeout(() => setFlash(null), 5000)
-  }
-
   const filtered = orgs?.filter((o) =>
     !q ||
     (o.name ?? '').toLowerCase().includes(q.toLowerCase()) ||
@@ -96,19 +98,31 @@ export default function OrgsTab() {
       <Box sx={{ mb: 2, display: 'flex', alignItems: 'baseline', gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h6" fontWeight={600}>Orgs</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1 }}>
-          Cross-tenant list of accounts on the platform. Read-only, plus SYSTEM-only new-account bootstrap.
+          Cross-tenant list of accounts on the platform. Read-only in the admin app.
         </Typography>
         <Button
-          variant="contained"
+          component={MuiLink}
+          href={CONSOLE_ACCOUNTS_URL}
+          target="_blank"
+          rel="noopener"
+          variant="outlined"
           size="small"
-          startIcon={<AddIcon />}
-          onClick={() => setWizardOpen(true)}
+          endIcon={<LaunchIcon />}
+          sx={{ textTransform: 'none' }}
         >
-          New account
+          Open in Console
         </Button>
       </Box>
 
-      {flash && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setFlash(null)}>{flash}</Alert>}
+      <Alert severity="info" sx={{ mb: 2 }}>
+        Account creation has moved to the main console —{' '}
+        <MuiLink href={CONSOLE_ACCOUNTS_URL} target="_blank" rel="noopener">
+          Directory → Accounts
+        </MuiLink>
+        . Use the New account wizard there to provision an account and
+        mint its first ACCOUNT_ADMIN invitation.
+      </Alert>
+
       {err && <Alert severity="error" sx={{ mb: 2 }}>{err}</Alert>}
 
       {!orgs && !err && (
@@ -188,12 +202,6 @@ export default function OrgsTab() {
           </Typography>
         </>
       )}
-
-      <NewAccountWizard
-        open={wizardOpen}
-        onClose={() => setWizardOpen(false)}
-        onCreated={handleCreated}
-      />
     </motion.div>
   )
 }
