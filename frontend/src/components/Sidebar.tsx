@@ -34,6 +34,8 @@ import FindInPageIcon from '@mui/icons-material/FindInPage'
 import LayersIcon from '@mui/icons-material/Layers'
 import SpeedIcon from '@mui/icons-material/Speed'
 import LanguageIcon from '@mui/icons-material/Language'
+import BuildCircleIcon from '@mui/icons-material/BuildCircle'
+import PlayCircleFilledIcon from '@mui/icons-material/PlayCircleFilled'
 
 // -----------------------------------------------------------------------------
 // Nav-tree model. Kept declarative so the render below is a straightforward
@@ -214,6 +216,24 @@ const TREE: NavNode[] = [
         Icon: SettingsIcon,
       },
       {
+        // Operational controls the operator can fire on demand — starts
+        // with a single leaf (CI Triggers) but shaped as a parent so
+        // future ops verbs (bulk scans, backup drills, log-capture toggle)
+        // slot in here without another nav refactor.
+        kind: 'parent',
+        label: 'Ops',
+        path: '',
+        Icon: BuildCircleIcon,
+        children: [
+          {
+            kind: 'leaf',
+            label: 'CI Triggers',
+            path: 'platform/ops/ci-controls',
+            Icon: PlayCircleFilledIcon,
+          },
+        ],
+      },
+      {
         kind: 'leaf',
         label: 'Docs',
         path: 'platform/docs',
@@ -233,6 +253,7 @@ const DEFAULT_EXPANDED: Record<string, boolean> = {
   AWS: true,
   Platform: true,
   Directory: true,
+  Ops: true,
   Azure: false,
 }
 

@@ -3382,6 +3382,238 @@ def get_cluster_events(cluster: str, namespace: Optional[str] = None, field_sele
     return {"events": events, "error": None}
 
 
+# ============================================================================
+# OPS · CI TRIGGERS (SCK — on-demand GitHub Actions workflow_dispatch)
+# ============================================================================
+#
+# On-demand button for verification workflows the operator wants to fire
+# outside cron — e.g. "verify a fresh PyPI install of the CLI still works
+# end-to-end". Every entry is server-side allowlisted; the UI never dispatches
+# a filename the caller made up.
+#
+# Auth: SYSTEM-only (both the ASGI JWT middleware above and the per-route
+# `require_system_user` dependency). Audit lines land on stdout so fluent-bit
+# in the control ns picks them up per the ns-label pattern.
+#
+# GitHub auth: fine-scoped PAT with `actions:write` on the allowlisted repos,
+# read from env `GH_OPS_DISPATCH_TOKEN`. Missing/empty → 503 with a friendly
+# "not configured" body (safe soft-launch — the Run button surfaces the
+# server-side reason rather than blowing up).
+# ============================================================================
+
+import httpx  # noqa: E402  — grouped with the ops block for locality
+from datetime import datetime, timezone as _tz  # noqa: E402
+
+
+class CiTrigger(BaseModel):
+    """Public shape returned from GET /api/ops/ci-triggers."""
+
+    id: str
+    name: str
+    description: str
+    target_repo: str  # "owner/repo"
+    workflow_filename: str
+    ref: str
+
+
+# v0 allowlist. Adding a new entry is a code change on purpose — the whole
+# point of an allowlist is that the surface area is grep-able. New rows land
+# with a follow-up PR (no runtime config, no DB row, no admin form).
+CI_TRIGGERS_ALLOWLIST: List[CiTrigger] = [
+    CiTrigger(
+        id="int-tests-pypi-fresh-install",
+        name="Verify fresh PyPI install works",
+        description=(
+            "Runs the integration-tests harness that installs the c2a CLI "
+            "from PyPI into a clean venv and exercises the smoke path — "
+            "catches PyPI publish regressions before customers do."
+        ),
+        target_repo="clue2solve/clue2app-integration-tests",
+        workflow_filename="pypi-fresh-install.yml",
+        ref="main",
+    ),
+]
+
+_CI_TRIGGERS_INDEX: Dict[str, CiTrigger] = {t.id: t for t in CI_TRIGGERS_ALLOWLIST}
+
+
+def _gh_token() -> Optional[str]:
+    tok = os.environ.get("GH_OPS_DISPATCH_TOKEN", "").strip()
+    return tok or None
+
+
+def _gh_headers(token: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "clue2app-admin-ops-ci/1.0",
+    }
+
+
+def _audit_log(event: str, **fields: Any) -> None:
+    """Structured JSON audit line on stdout. Fluent-bit in the control ns
+    scoops it via the ns label pattern per fluentbit_log_capture memo.
+    Fire-and-forget: audit never blocks the mutation."""
+    try:
+        payload = {
+            "audit": True,
+            "event": event,
+            "ts": datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            **fields,
+        }
+        # print is line-buffered under uvicorn — one line per audit row.
+        print(json.dumps(payload, default=str), flush=True)
+    except Exception:
+        # Never let audit-log formatting break the request.
+        pass
+
+
+def _fetch_last_run(trigger: CiTrigger, token: str) -> Optional[Dict[str, Any]]:
+    """Ask GH for the most recent workflow_dispatch run on this workflow.
+    Returns a compact shape the UI renders directly, or None on any error
+    (the UI treats missing last-run as "no history yet")."""
+    owner, repo = trigger.target_repo.split("/", 1)
+    url = (
+        f"https://api.github.com/repos/{owner}/{repo}"
+        f"/actions/workflows/{trigger.workflow_filename}/runs"
+    )
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            resp = client.get(
+                url,
+                headers=_gh_headers(token),
+                params={"per_page": 1, "event": "workflow_dispatch"},
+            )
+        if resp.status_code != 200:
+            return None
+        runs = resp.json().get("workflow_runs") or []
+        if not runs:
+            return None
+        r = runs[0]
+        return {
+            "run_id": r.get("id"),
+            "run_number": r.get("run_number"),
+            "status": r.get("status"),  # queued | in_progress | completed
+            "conclusion": r.get("conclusion"),  # success | failure | cancelled | ...
+            "html_url": r.get("html_url"),
+            "created_at": r.get("created_at"),
+            "updated_at": r.get("updated_at"),
+            "actor": (r.get("actor") or {}).get("login"),
+            "event": r.get("event"),
+        }
+    except Exception:
+        return None
+
+
+@app.get("/api/ops/ci-triggers")
+def list_ci_triggers(claims: Dict[str, Any] = Depends(require_system_user)):
+    """List the on-demand CI triggers the operator is allowed to fire.
+    Includes the last workflow_dispatch run (or null) for each row so the
+    UI shows outcome state at first paint."""
+    _ = claims
+    token = _gh_token()
+    triggers_out: List[Dict[str, Any]] = []
+    for t in CI_TRIGGERS_ALLOWLIST:
+        row: Dict[str, Any] = t.model_dump()
+        row["last_run"] = _fetch_last_run(t, token) if token else None
+        triggers_out.append(row)
+    return {
+        "triggers": triggers_out,
+        "gh_token_configured": token is not None,
+    }
+
+
+@app.post("/api/ops/ci-triggers/{trigger_id}/run")
+def run_ci_trigger(
+    trigger_id: str, claims: Dict[str, Any] = Depends(require_system_user)
+):
+    """Fire the allowlisted workflow_dispatch.
+    Server-side allowlist enforcement — the client can't dispatch anything
+    that isn't in `CI_TRIGGERS_ALLOWLIST` (unknown id → 404, and even a
+    matched id maps to a fixed repo+workflow_filename+ref the client can't
+    override). Missing GH token → 503 with a clear reason."""
+    trigger = _CI_TRIGGERS_INDEX.get(trigger_id)
+    if trigger is None:
+        # Do not echo `trigger_id` into the error (defence-in-depth against
+        # log-injection from a hostile caller — cheap and easy).
+        raise HTTPException(status_code=404, detail="unknown ci trigger id")
+
+    token = _gh_token()
+    if token is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "GH_OPS_DISPATCH_TOKEN not configured on this admin instance "
+                "— an operator must mint a fine-scoped PAT with actions:write "
+                "on the target repo and mount it before this button will fire."
+            ),
+        )
+
+    actor = claims.get("sub") or claims.get("email") or "unknown"
+    owner, repo = trigger.target_repo.split("/", 1)
+    url = (
+        f"https://api.github.com/repos/{owner}/{repo}"
+        f"/actions/workflows/{trigger.workflow_filename}/dispatches"
+    )
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
+                url, headers=_gh_headers(token), json={"ref": trigger.ref}
+            )
+    except httpx.HTTPError as e:
+        _audit_log(
+            "ops.ci.dispatch",
+            actor=actor,
+            trigger_id=trigger.id,
+            target_repo=trigger.target_repo,
+            workflow_filename=trigger.workflow_filename,
+            ref=trigger.ref,
+            outcome="network_error",
+            error=str(e),
+        )
+        raise HTTPException(status_code=502, detail=f"GitHub dispatch failed: {e}")
+
+    _audit_log(
+        "ops.ci.dispatch",
+        actor=actor,
+        trigger_id=trigger.id,
+        target_repo=trigger.target_repo,
+        workflow_filename=trigger.workflow_filename,
+        ref=trigger.ref,
+        outcome="dispatched" if resp.status_code == 204 else "gh_error",
+        gh_status=resp.status_code,
+    )
+
+    if resp.status_code != 204:
+        # GH's error body is JSON; surface `message` to help the operator
+        # (missing scope, wrong ref, workflow not found on the ref, …).
+        gh_message: Optional[str] = None
+        try:
+            gh_message = (resp.json() or {}).get("message")
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"GitHub dispatch returned {resp.status_code}"
+                + (f": {gh_message}" if gh_message else "")
+            ),
+        )
+
+    # GH's dispatches endpoint returns 204 with no body and no run id — the
+    # new run appears asynchronously on the workflow's runs listing. Give
+    # it a beat, then look up the latest run so the UI can jump straight
+    # to it (Actions API is eventually consistent — best-effort).
+    last_run = _fetch_last_run(trigger, token)
+
+    return {
+        "trigger_id": trigger.id,
+        "dispatched": True,
+        "last_run": last_run,
+    }
+
+
 # Serve static frontend files if they exist (for production Docker deployment)
 static_path = Path(__file__).parent / "static"
 if static_path.exists():

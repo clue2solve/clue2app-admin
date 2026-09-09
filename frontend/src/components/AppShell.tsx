@@ -25,6 +25,7 @@ import PlatformLimitsTab from './PlatformLimitsTab'
 import DomainsTab from './DomainsTab'
 import ReleasesTab from './ReleasesTab'
 import LlmSpendTab from './LlmSpendTab'
+import OpsCiControlsTab from './OpsCiControlsTab'
 
 // -----------------------------------------------------------------------------
 // The path model. Every leaf in the sidebar owns a slash-delimited path — no
@@ -150,6 +151,8 @@ export default function AppShell(): JSX.Element {
         return <PlatformLimitsTab />
       case 'platform/domains':
         return <DomainsTab />
+      case 'platform/ops/ci-controls':
+        return <OpsCiControlsTab />
       case 'system/llm/spend':
         // SCK-632 — SYSTEM-only. Coord enforces the guard; UI shows
         // whatever error coord returns if a non-SYSTEM caller reaches
