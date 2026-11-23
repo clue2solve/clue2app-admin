@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api'
 import {
   Box,
   Typography,
@@ -392,7 +393,7 @@ function AgentsTab({ onOpenAgent }: AgentsTabProps = {}) {
 
   const fetchDashboard = useCallback(async () => {
     try {
-      const response = await fetch(`${AGENTS_URL}/dashboard`)
+      const response = await apiFetch(`${AGENTS_URL}/dashboard`)
       if (!response.ok) throw new Error('Failed to fetch agents dashboard')
       const data = (await response.json()) as Dashboard
       setDashboard(data)
@@ -412,7 +413,7 @@ function AgentsTab({ onOpenAgent }: AgentsTabProps = {}) {
 
   const handleStartAgent = async (agentName: string) => {
     try {
-      await fetch(`${AGENTS_URL}/agents/${agentName}/start`, { method: 'POST' })
+      await apiFetch(`${AGENTS_URL}/agents/${agentName}/start`, { method: 'POST' })
       fetchDashboard()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start agent')
@@ -421,7 +422,7 @@ function AgentsTab({ onOpenAgent }: AgentsTabProps = {}) {
 
   const handleStopAgent = async (agentName: string) => {
     try {
-      await fetch(`${AGENTS_URL}/agents/${agentName}/stop`, { method: 'POST' })
+      await apiFetch(`${AGENTS_URL}/agents/${agentName}/stop`, { method: 'POST' })
       fetchDashboard()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to stop agent')
@@ -431,7 +432,7 @@ function AgentsTab({ onOpenAgent }: AgentsTabProps = {}) {
   const handleTriggerHeal = async (agentName: string, dryRun = false) => {
     setHealingAgent(agentName)
     try {
-      const response = await fetch(`${AGENTS_URL}/heal`, {
+      const response = await apiFetch(`${AGENTS_URL}/heal`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agent: agentName, dry_run: dryRun }),
