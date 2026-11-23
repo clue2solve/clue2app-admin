@@ -3614,6 +3614,417 @@ def run_ci_trigger(
     }
 
 
+# ============================================================================
+# AGENTS PROXY  —  /api/agents/<path>
+# ============================================================================
+#
+# The admin SPA (AgentsTab, AgentDetailPage) and the console's SYSTEM-only
+# Metrics and Costs pages call the platform agents service through this
+# backend. jwt_auth_middleware has already checked the caller's c2a JWT
+# (SYSTEM users only) by the time a request reaches the handler; the handler
+# then calls the agents service in-cluster with this backend's own
+# service-to-service token.
+#
+#   AGENTS_INTERNAL_URL   upstream base URL (default: the in-cluster ksvc)
+#   AGENTS_SERVICE_TOKEN  sent upstream as `Authorization: Bearer <token>`;
+#                         unset or empty → 503, nothing is sent upstream
+#
+# Rules:
+#   * Only the (method, path) pairs in AGENTS_PROXY_ALLOWLIST are forwarded.
+#     Adding one is a code change on purpose, like CI_TRIGGERS_ALLOWLIST.
+#   * The caller supplies a path, never a URL. Every segment must match
+#     [A-Za-z0-9_-]+ and the raw request path must equal the decoded one, so
+#     `..`, `%2e`, `%2f`, `//`, `@`, `\` and `scheme://` are refused before
+#     the allowlist is consulted. The host always comes from
+#     AGENTS_INTERNAL_URL.
+#   * Upstream gets Accept, Content-Type and the service token, nothing else.
+#     The caller's Authorization header, cookies and `?token=` are not
+#     forwarded.
+#   * Upstream 401/403, redirects and 5xx come back as a 502 with a fixed
+#     message; their bodies are neither returned nor logged. A 401 is never
+#     passed through, because the SPA treats any 401 as an ended session.
+#   * Cross-origin: only GET /api/agents/costs and /api/agents/costs/*, only
+#     from CONSOLE_ORIGINS, Authorization request header only, never with
+#     credentials (AgentsCostsCorsMiddleware, below).
+# ============================================================================
+
+import re  # noqa: E402
+from fastapi.responses import Response  # noqa: E402
+from starlette.datastructures import Headers, MutableHeaders  # noqa: E402
+
+AGENTS_DEFAULT_INTERNAL_URL = "http://clue2app-agents.control.svc.cluster.local"
+AGENTS_PROXY_PREFIX = "/api/agents/"
+
+# Agent names as registered in the agents service (ecr-healer, cost-tracker…).
+_AGENT_NAME = r"[a-z0-9][a-z0-9_-]{0,63}"
+
+# (method, upstream path). Each entry is called by a UI today:
+#   admin   frontend/src/components/AgentsTab.tsx, AgentDetailPage.tsx
+#   console src/pages/Costs.js, src/pages/Metrics.js,
+#           src/components/MetricsPanel.js
+AGENTS_PROXY_ALLOWLIST: List[Tuple[str, str]] = [
+    # admin
+    ("GET", r"dashboard"),
+    ("GET", rf"agents/{_AGENT_NAME}/status"),
+    ("GET", rf"agents/{_AGENT_NAME}/history"),
+    ("POST", rf"agents/{_AGENT_NAME}/start"),
+    ("POST", rf"agents/{_AGENT_NAME}/stop"),
+    # Upstream may answer 404 here; AgentDetailPage shows "not available".
+    ("POST", rf"agents/{_AGENT_NAME}/check"),
+    ("POST", r"heal"),
+    # console
+    ("GET", r"costs"),
+    ("GET", r"costs/summary"),
+    ("GET", r"costs/trends"),
+    ("GET", r"costs/pricing-model"),
+    ("GET", r"costs/metrics-history"),
+    ("POST", r"heal/costs"),
+]
+_AGENTS_PROXY_RULES = [(m, re.compile(p)) for m, p in AGENTS_PROXY_ALLOWLIST]
+
+# Console origins allowed to read /api/agents/costs[/...] cross-origin.
+CONSOLE_ORIGINS = frozenset(
+    {
+        "https://console.clue2.app",
+        "https://console.control.apps.clue2.app",
+    }
+)
+
+_AGENTS_SEGMENT = re.compile(r"[A-Za-z0-9_-]+")
+_AGENTS_MAX_PATH_SEGMENTS = 8
+_AGENTS_MAX_PATH_LENGTH = 256
+_AGENTS_CONNECT_TIMEOUT_S = 3.0
+# Heal runs the agent's check inline upstream, so POSTs get a longer read.
+_AGENTS_READ_TIMEOUT_S = {"GET": 15.0, "POST": 120.0}
+_AGENTS_MAX_REQUEST_BODY_BYTES = 64 * 1024
+# A 24h metrics-history payload is a few MB; this is a ceiling, not a target.
+_AGENTS_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+# `token` is the query-string form of the caller's JWT (_extract_token).
+_AGENTS_DROPPED_QUERY_PARAMS = frozenset({"token"})
+_AGENTS_RESPONSE_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
+class _AgentsResponseTooLarge(Exception):
+    pass
+
+
+def _agents_service_token() -> Optional[str]:
+    """The upstream credential, or None when it is unset or unusable.
+
+    A value with whitespace or control characters can't be sent as a header,
+    so it counts as not configured rather than being sent half-formed."""
+    tok = os.environ.get("AGENTS_SERVICE_TOKEN", "").strip()
+    if not tok or not all(33 <= ord(c) <= 126 for c in tok):
+        return None
+    return tok
+
+
+def _agents_base_url() -> Optional[httpx.URL]:
+    raw = os.environ.get("AGENTS_INTERNAL_URL", "").strip() or AGENTS_DEFAULT_INTERNAL_URL
+    try:
+        url = httpx.URL(raw)
+    except Exception:
+        return None
+    if url.scheme not in ("http", "https") or not url.host:
+        return None
+    if url.userinfo or url.query or url.fragment:
+        return None
+    return url
+
+
+def _agents_path_is_clean(path: str) -> bool:
+    """1-8 segments of [A-Za-z0-9_-]. Rejects empty segments (`//`, a
+    trailing `/`), dots, `%`, `@`, `\\`, `:` and anything else."""
+    if not path or len(path) > _AGENTS_MAX_PATH_LENGTH:
+        return False
+    segments = path.split("/")
+    if len(segments) > _AGENTS_MAX_PATH_SEGMENTS:
+        return False
+    return all(_AGENTS_SEGMENT.fullmatch(s) for s in segments)
+
+
+def _agents_raw_path_is_plain(request: Request) -> bool:
+    """True when the request path had no percent-encoding at all.
+
+    Starlette decodes `%2e` / `%2f` / `%5c` before routing, so the decoded
+    path alone can't show that the client encoded something; the raw path
+    can. Servers that don't supply raw_path fall back to the decoded check."""
+    raw = request.scope.get("raw_path")
+    if raw is None:
+        return True
+    return raw == request.scope.get("path", "").encode("utf-8")
+
+
+def _agents_allowed_methods(path: str) -> List[str]:
+    return [m for m, rx in _AGENTS_PROXY_RULES if rx.fullmatch(path)]
+
+
+def _agents_http_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    """Upstream client. A function so tests can swap in httpx.MockTransport.
+
+    trust_env=False: no proxy env vars and no .netrc credentials on an
+    in-cluster call."""
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False)
+
+
+async def _agents_read_capped(resp: httpx.Response, cap: int) -> bytes:
+    declared = resp.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > cap:
+        raise _AgentsResponseTooLarge()
+    chunks: List[bytes] = []
+    total = 0
+    async for chunk in resp.aiter_bytes():
+        total += len(chunk)
+        if total > cap:
+            raise _AgentsResponseTooLarge()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _agents_is_json(content_type: str) -> bool:
+    return content_type.split(";", 1)[0].strip().lower() == "application/json"
+
+
+def _agents_error(status: int, error: str, message: str) -> JSONResponse:
+    resp = _json_error(status, error, message)
+    resp.headers.update(_AGENTS_RESPONSE_HEADERS)
+    return resp
+
+
+def _agents_map_response(status: int, content_type: str, data: bytes) -> Response:
+    """Turn the upstream answer into what the browser gets.
+
+    2xx JSON and 4xx JSON (e.g. 404 "agent not found") pass through. 401/403
+    mean upstream refused *our* service token, which is a server-side
+    problem, so they become 502 rather than a 401 that would sign the user
+    out. Redirects and 5xx become 502. No upstream body is returned in those
+    cases, and only the status number is echoed."""
+    if 200 <= status < 300:
+        if not data:
+            return Response(status_code=status, headers=_AGENTS_RESPONSE_HEADERS)
+        if not _agents_is_json(content_type):
+            return _agents_error(
+                502, "AGENTS_UPSTREAM_ERROR", "agents service returned a non-JSON response"
+            )
+        return Response(
+            content=data,
+            status_code=status,
+            media_type="application/json",
+            headers=_AGENTS_RESPONSE_HEADERS,
+        )
+    if status in (401, 403):
+        return _agents_error(
+            502,
+            "AGENTS_UPSTREAM_AUTH",
+            "agents service did not accept the admin service token",
+        )
+    if 400 <= status < 500:
+        if data and _agents_is_json(content_type):
+            return Response(
+                content=data,
+                status_code=status,
+                media_type="application/json",
+                headers=_AGENTS_RESPONSE_HEADERS,
+            )
+        return _agents_error(
+            status, "AGENTS_REQUEST_REJECTED", f"agents service returned HTTP {status}"
+        )
+    return _agents_error(
+        502, "AGENTS_UPSTREAM_ERROR", f"agents service returned HTTP {status}"
+    )
+
+
+@app.api_route(AGENTS_PROXY_PREFIX + "{path:path}", methods=["GET", "POST"])
+async def agents_proxy(
+    path: str,
+    request: Request,
+    claims: Dict[str, Any] = Depends(require_system_user),
+):
+    """Forward an allowlisted call to the agents service (see block comment)."""
+    method = request.method.upper()
+
+    if not _agents_path_is_clean(path) or not _agents_raw_path_is_plain(request):
+        # Don't echo the path back: it is attacker-controlled.
+        return _agents_error(400, "BAD_REQUEST", "invalid agents path")
+
+    allowed = _agents_allowed_methods(path)
+    if not allowed:
+        return _agents_error(404, "NOT_FOUND", "unknown agents route")
+    if method not in allowed:
+        resp = _agents_error(405, "METHOD_NOT_ALLOWED", "method not allowed on this agents route")
+        resp.headers["Allow"] = ", ".join(sorted(set(allowed)))
+        return resp
+
+    token = _agents_service_token()
+    base = _agents_base_url()
+    if token is None or base is None:
+        return _agents_error(
+            503,
+            "AGENTS_PROXY_NOT_CONFIGURED",
+            "the agents proxy is not configured on this admin instance",
+        )
+
+    body = b""
+    if method == "POST":
+        body = await request.body()
+        if len(body) > _AGENTS_MAX_REQUEST_BODY_BYTES:
+            return _agents_error(413, "PAYLOAD_TOO_LARGE", "request body too large")
+        if body:
+            if not _agents_is_json(request.headers.get("content-type", "")):
+                return _agents_error(
+                    415, "UNSUPPORTED_MEDIA_TYPE", "request body must be application/json"
+                )
+            try:
+                json.loads(body)
+            except ValueError:
+                return _agents_error(400, "BAD_REQUEST", "request body is not valid JSON")
+
+    target = base.copy_with(path=base.path.rstrip("/") + "/" + path)
+    if (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port):
+        # Unreachable given the path rules above; kept as a last line.
+        return _agents_error(400, "BAD_REQUEST", "invalid agents path")
+
+    params = [
+        (k, v)
+        for k, v in request.query_params.multi_items()
+        if k.lower() not in _AGENTS_DROPPED_QUERY_PARAMS
+    ]
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "clue2app-admin-agents-proxy/1.0",
+    }
+    if body:
+        headers["Content-Type"] = "application/json"
+    timeout = httpx.Timeout(
+        connect=_AGENTS_CONNECT_TIMEOUT_S,
+        read=_AGENTS_READ_TIMEOUT_S[method],
+        write=10.0,
+        pool=_AGENTS_CONNECT_TIMEOUT_S,
+    )
+
+    upstream_status: Optional[int] = None
+    try:
+        async with _agents_http_client(timeout) as client:
+            async with client.stream(
+                method, target, params=params, headers=headers, content=body or None
+            ) as upstream:
+                upstream_status = upstream.status_code
+                content_type = upstream.headers.get("content-type", "")
+                data = await _agents_read_capped(upstream, _AGENTS_MAX_RESPONSE_BYTES)
+        result = _agents_map_response(upstream_status, content_type, data)
+        outcome = "ok" if result.status_code < 400 else "error"
+    except _AgentsResponseTooLarge:
+        result = _agents_error(502, "AGENTS_UPSTREAM_ERROR", "agents service response too large")
+        outcome = "too_large"
+    except httpx.TimeoutException:
+        result = _agents_error(504, "AGENTS_TIMEOUT", "agents service did not answer in time")
+        outcome = "timeout"
+    except httpx.HTTPError:
+        result = _agents_error(502, "AGENTS_UNREACHABLE", "agents service is unreachable")
+        outcome = "unreachable"
+
+    # Audit every call that changes something, and every failure. Reads that
+    # succeed are polled every 30s by the UI and would only add noise. Only
+    # the validated path and status codes are logged: never headers, tokens
+    # or upstream bodies.
+    if method != "GET" or outcome != "ok":
+        _audit_log(
+            "agents.proxy",
+            actor=claims.get("sub") or "unknown",
+            method=method,
+            path=path,
+            upstream_status=upstream_status,
+            status=result.status_code,
+            outcome=outcome,
+        )
+    return result
+
+
+_AGENTS_COSTS_PATH = re.compile(r"/api/agents/costs(?:/[A-Za-z0-9_-]+)*")
+_AGENTS_CORS_REQUEST_HEADERS = frozenset({"authorization"})
+
+
+class AgentsCostsCorsMiddleware:
+    """CORS for the console's cross-origin reads of /api/agents/costs[/...].
+
+    Registered after the app-wide CORSMiddleware and jwt_auth_middleware, so
+    it is the outermost layer and sees the preflight first. It answers only
+    when all of these hold: the path is /api/agents/costs or below it, the
+    Origin is one of CONSOLE_ORIGINS, and the request is a GET (or a
+    preflight for a GET that asks for no header beyond Authorization).
+    Everything else passes through untouched, to the app-wide CORS policy.
+
+    The console sends its c2a JWT as a bearer header, not a cookie, so the
+    responses never carry Access-Control-Allow-Credentials; the app-wide
+    middleware's copy of that header is removed on these responses."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or not _AGENTS_COSTS_PATH.fullmatch(scope.get("path", "")):
+            await self.app(scope, receive, send)
+            return
+        request_headers = Headers(scope=scope)
+        origin = request_headers.get("origin")
+        if origin not in CONSOLE_ORIGINS:
+            await self.app(scope, receive, send)
+            return
+
+        method = scope["method"]
+        if method == "OPTIONS" and "access-control-request-method" in request_headers:
+            if self._preflight_allowed(request_headers):
+                preflight = Response(
+                    status_code=204,
+                    headers={
+                        "Access-Control-Allow-Origin": origin,
+                        "Access-Control-Allow-Methods": "GET",
+                        "Access-Control-Allow-Headers": "Authorization",
+                        "Access-Control-Max-Age": "600",
+                        "Vary": "Origin, Access-Control-Request-Method, "
+                        "Access-Control-Request-Headers",
+                    },
+                )
+                await preflight(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+            return
+        if method != "GET":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_cors(message: Dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                if "access-control-allow-credentials" in headers:
+                    del headers["access-control-allow-credentials"]
+                headers["Access-Control-Allow-Origin"] = origin
+                vary = [v.strip().lower() for v in ",".join(headers.getlist("vary")).split(",")]
+                if "origin" not in vary:
+                    headers.append("Vary", "Origin")
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
+
+    @staticmethod
+    def _preflight_allowed(request_headers: Headers) -> bool:
+        if request_headers.get("access-control-request-method", "").strip().upper() != "GET":
+            return False
+        requested = {
+            h.strip().lower()
+            for h in request_headers.get("access-control-request-headers", "").split(",")
+            if h.strip()
+        }
+        return requested <= _AGENTS_CORS_REQUEST_HEADERS
+
+
+app.add_middleware(AgentsCostsCorsMiddleware)
+
+
 # Serve static frontend files if they exist (for production Docker deployment)
 static_path = Path(__file__).parent / "static"
 if static_path.exists():
