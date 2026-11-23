@@ -1,0 +1,10 @@
+# Clue2App platform — vulnerability disclosure
+# Please report security issues to the address below. We aim to
+# acknowledge reports within 2 business days and provide a fuller
+# response within 5. Responsible disclosure is appreciated; please
+# do not publish details before we have had a chance to remediate.
+
+Contact: mailto:security@clue2solve.com
+Expires: 2027-07-20T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://clue2app.com/.well-known/security.txt
