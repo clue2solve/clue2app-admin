@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { apiFetch } from '../api'
 import {
   Box,
   Typography,
@@ -390,7 +391,7 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
 
   const fetchDashboard = useCallback(async () => {
     try {
-      const res = await fetch(`${AGENTS_URL}/dashboard`)
+      const res = await apiFetch(`${AGENTS_URL}/dashboard`)
       if (!res.ok) return
       const data = (await res.json()) as Dashboard
       setDashboard(data)
@@ -401,7 +402,7 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${AGENTS_URL}/agents/${agentName}/status`)
+      const res = await apiFetch(`${AGENTS_URL}/agents/${agentName}/status`)
       if (!res.ok) {
         setStatusUnavailable(true)
         return
@@ -416,7 +417,7 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
 
   const fetchHistory = useCallback(async () => {
     try {
-      const res = await fetch(`${AGENTS_URL}/agents/${agentName}/history?limit=50`)
+      const res = await apiFetch(`${AGENTS_URL}/agents/${agentName}/history?limit=50`)
       if (!res.ok) {
         setHistoryUnavailable(true)
         setHistory([])
@@ -524,7 +525,7 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
     setStarting(true)
     setActionError(null)
     try {
-      await fetch(`${AGENTS_URL}/agents/${agentName}/start`, { method: 'POST' })
+      await apiFetch(`${AGENTS_URL}/agents/${agentName}/start`, { method: 'POST' })
       await refreshAll()
     } catch (e) {
       setActionError(e instanceof Error ? e.message : 'Failed to start agent')
@@ -537,7 +538,7 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
     setStopping(true)
     setActionError(null)
     try {
-      await fetch(`${AGENTS_URL}/agents/${agentName}/stop`, { method: 'POST' })
+      await apiFetch(`${AGENTS_URL}/agents/${agentName}/stop`, { method: 'POST' })
       await refreshAll()
     } catch (e) {
       setActionError(e instanceof Error ? e.message : 'Failed to stop agent')
@@ -550,7 +551,7 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
     setHealing(true)
     setActionError(null)
     try {
-      const res = await fetch(`${AGENTS_URL}/heal`, {
+      const res = await apiFetch(`${AGENTS_URL}/heal`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agent: agentName, dry_run: dryRun }),
@@ -574,7 +575,7 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
     setTriggering(true)
     setActionError(null)
     try {
-      const res = await fetch(`${AGENTS_URL}/agents/${agentName}/check`, {
+      const res = await apiFetch(`${AGENTS_URL}/agents/${agentName}/check`, {
         method: 'POST',
       })
       if (res.status === 404) {
