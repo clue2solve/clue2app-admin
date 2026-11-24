@@ -53,6 +53,30 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   return response
 }
 
+// Platform agents service, reached through the admin backend's /api/agents
+// proxy (SYSTEM users only, allowlisted routes; see backend/main.py). Pass
+// the agents-service path as segments, e.g. agentsApiPath('dashboard') or
+// agentsApiPath('agents', name, 'status'). Each segment is URI-encoded, so a
+// value can't add path segments of its own.
+export const AGENTS_API_BASE = '/api/agents'
+
+export function agentsApiPath(...segments: string[]): string {
+  return `${AGENTS_API_BASE}/${segments.map((s) => encodeURIComponent(s)).join('/')}`
+}
+
+// Readable message for a failed response: the admin backend's
+// { error, message } body, an upstream { detail } string, or the status.
+export async function responseErrorMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await response.json()) as { message?: unknown; detail?: unknown } | null
+    if (body && typeof body.message === 'string' && body.message) return body.message
+    if (body && typeof body.detail === 'string' && body.detail) return body.detail
+  } catch {
+    // not JSON
+  }
+  return `${fallback} (HTTP ${response.status})`
+}
+
 export async function apiGet<T>(url: string): Promise<T> {
   const response = await apiFetch(url, { method: 'GET' })
   if (!response.ok) {

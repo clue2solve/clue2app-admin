@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch, agentsApiPath, responseErrorMessage } from '../api'
 import {
   Box,
   Typography,
@@ -34,14 +35,8 @@ import {
 } from '@mui/icons-material'
 import { motion } from 'framer-motion'
 
-// The Platform Agents backend runs as a Knative service in-cluster and
-// is reachable at the public URL below. We call it directly from the
-// browser rather than proxying through the admin backend.
-//
-// NOTE: CORS on the agents ksvc must allow admin.control.apps.clue2.app
-// (and admin.clue2.app). If requests fail with a CORS error, update the
-// clue2app-agents ksvc CORS allow-list.
-const AGENTS_URL = 'https://clue2app-agents.control.apps.clue2.app'
+// Platform Agents calls go to the admin backend (agentsApiPath → /api/agents/…),
+// which forwards an allowlisted set of routes to the agents service in-cluster.
 
 // The Agent Alerts feed lives on the coordinator (persisted from
 // OTel-emitted agent alerts). Reads require a JWT — reuse the token the
@@ -391,8 +386,10 @@ function AgentsTab({ onOpenAgent }: AgentsTabProps = {}) {
 
   const fetchDashboard = useCallback(async () => {
     try {
-      const response = await fetch(`${AGENTS_URL}/dashboard`)
-      if (!response.ok) throw new Error('Failed to fetch agents dashboard')
+      const response = await apiFetch(agentsApiPath('dashboard'))
+      if (!response.ok) {
+        throw new Error(await responseErrorMessage(response, 'Failed to fetch agents dashboard'))
+      }
       const data = (await response.json()) as Dashboard
       setDashboard(data)
       setError(null)
@@ -411,7 +408,12 @@ function AgentsTab({ onOpenAgent }: AgentsTabProps = {}) {
 
   const handleStartAgent = async (agentName: string) => {
     try {
-      await fetch(`${AGENTS_URL}/agents/${agentName}/start`, { method: 'POST' })
+      const response = await apiFetch(agentsApiPath('agents', agentName, 'start'), {
+        method: 'POST',
+      })
+      if (!response.ok) {
+        throw new Error(await responseErrorMessage(response, 'Failed to start agent'))
+      }
       fetchDashboard()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start agent')
@@ -420,7 +422,12 @@ function AgentsTab({ onOpenAgent }: AgentsTabProps = {}) {
 
   const handleStopAgent = async (agentName: string) => {
     try {
-      await fetch(`${AGENTS_URL}/agents/${agentName}/stop`, { method: 'POST' })
+      const response = await apiFetch(agentsApiPath('agents', agentName, 'stop'), {
+        method: 'POST',
+      })
+      if (!response.ok) {
+        throw new Error(await responseErrorMessage(response, 'Failed to stop agent'))
+      }
       fetchDashboard()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to stop agent')
@@ -430,11 +437,14 @@ function AgentsTab({ onOpenAgent }: AgentsTabProps = {}) {
   const handleTriggerHeal = async (agentName: string, dryRun = false) => {
     setHealingAgent(agentName)
     try {
-      const response = await fetch(`${AGENTS_URL}/heal`, {
+      const response = await apiFetch(agentsApiPath('heal'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agent: agentName, dry_run: dryRun }),
       })
+      if (!response.ok) {
+        throw new Error(await responseErrorMessage(response, 'Failed to trigger heal'))
+      }
       const result = (await response.json()) as Omit<HealResult, 'agent'>
       setHealResult({ agent: agentName, ...result })
       fetchDashboard()
