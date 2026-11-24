@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { apiFetch } from '../api'
+import { apiFetch, agentsApiPath, responseErrorMessage } from '../api'
 import {
   Box,
   Typography,
@@ -45,8 +45,8 @@ import {
 } from '@mui/icons-material'
 import { motion } from 'framer-motion'
 
-// Same endpoints AgentsTab uses.
-const AGENTS_URL = 'https://clue2app-agents.control.apps.clue2.app'
+// Same endpoints AgentsTab uses: agents-service calls through the admin
+// backend (agentsApiPath → /api/agents/…), alerts from the coordinator.
 const COORDINATOR_URL = 'https://coordinator.control.apps.clue2.app'
 
 // -----------------------------------------------------------------------------
@@ -391,7 +391,7 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
 
   const fetchDashboard = useCallback(async () => {
     try {
-      const res = await apiFetch(`${AGENTS_URL}/dashboard`)
+      const res = await apiFetch(agentsApiPath('dashboard'))
       if (!res.ok) return
       const data = (await res.json()) as Dashboard
       setDashboard(data)
@@ -402,7 +402,7 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await apiFetch(`${AGENTS_URL}/agents/${agentName}/status`)
+      const res = await apiFetch(agentsApiPath('agents', agentName, 'status'))
       if (!res.ok) {
         setStatusUnavailable(true)
         return
@@ -417,7 +417,7 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
 
   const fetchHistory = useCallback(async () => {
     try {
-      const res = await apiFetch(`${AGENTS_URL}/agents/${agentName}/history?limit=50`)
+      const res = await apiFetch(`${agentsApiPath('agents', agentName, 'history')}?limit=50`)
       if (!res.ok) {
         setHistoryUnavailable(true)
         setHistory([])
@@ -525,7 +525,10 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
     setStarting(true)
     setActionError(null)
     try {
-      await apiFetch(`${AGENTS_URL}/agents/${agentName}/start`, { method: 'POST' })
+      const res = await apiFetch(agentsApiPath('agents', agentName, 'start'), {
+        method: 'POST',
+      })
+      if (!res.ok) throw new Error(await responseErrorMessage(res, 'Failed to start agent'))
       await refreshAll()
     } catch (e) {
       setActionError(e instanceof Error ? e.message : 'Failed to start agent')
@@ -538,7 +541,10 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
     setStopping(true)
     setActionError(null)
     try {
-      await apiFetch(`${AGENTS_URL}/agents/${agentName}/stop`, { method: 'POST' })
+      const res = await apiFetch(agentsApiPath('agents', agentName, 'stop'), {
+        method: 'POST',
+      })
+      if (!res.ok) throw new Error(await responseErrorMessage(res, 'Failed to stop agent'))
       await refreshAll()
     } catch (e) {
       setActionError(e instanceof Error ? e.message : 'Failed to stop agent')
@@ -551,11 +557,12 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
     setHealing(true)
     setActionError(null)
     try {
-      const res = await apiFetch(`${AGENTS_URL}/heal`, {
+      const res = await apiFetch(agentsApiPath('heal'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agent: agentName, dry_run: dryRun }),
       })
+      if (!res.ok) throw new Error(await responseErrorMessage(res, 'Failed to trigger heal'))
       const result = (await res.json()) as Omit<HealResult, 'agent'>
       setInlineHealResult({
         agent: agentName,
@@ -575,14 +582,14 @@ export default function AgentDetailPage({ agentName, onBack }: AgentDetailPagePr
     setTriggering(true)
     setActionError(null)
     try {
-      const res = await apiFetch(`${AGENTS_URL}/agents/${agentName}/check`, {
+      const res = await apiFetch(agentsApiPath('agents', agentName, 'check'), {
         method: 'POST',
       })
       if (res.status === 404) {
         setCheckNowUnavailable(true)
         return
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      if (!res.ok) throw new Error(await responseErrorMessage(res, 'Failed to trigger check'))
       await refreshAll()
     } catch (e) {
       setActionError(e instanceof Error ? e.message : 'Failed to trigger check')
