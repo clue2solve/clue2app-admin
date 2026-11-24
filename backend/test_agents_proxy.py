@@ -9,6 +9,8 @@ What is covered:
   * only safe headers go upstream, plus the service token; the caller's
     Authorization header, cookies and ?token= do not;
   * error mapping, timeouts, and that upstream bodies are not echoed or logged;
+  * audit: one line per refused call with a fixed reason code and never a
+    refused raw path; POSTs and failures that reached upstream as before;
   * CORS for the console origins on GET /api/agents/costs[/...] only.
 
 No network: the upstream is an httpx.MockTransport. The JWT signing key and
@@ -49,7 +51,6 @@ ROUTE_EXAMPLES: List[Tuple[str, str, Optional[dict]]] = [
     ("GET", "costs/trends?period=daily&months=3", None),
     ("GET", "costs/pricing-model", None),
     ("GET", "costs/metrics-history?hours=24", None),
-    ("POST", "heal/costs", None),
 ]
 
 
@@ -228,7 +229,6 @@ def test_allowlist_is_exactly_the_routes_the_uis_call():
         ("GET", "costs/trends"),
         ("GET", "costs/pricing-model"),
         ("GET", "costs/metrics-history"),
-        ("POST", "heal/costs"),
     }
 
 
@@ -258,6 +258,9 @@ def test_allowlisted_route_is_forwarded_to_the_fixed_upstream(env, upstream, met
         ("POST", "heal/nodes"),
         ("POST", "heal/builders"),
         ("POST", "heal/platform"),
+        # No UI calls it: the console reads costs only.
+        ("POST", "heal/costs"),
+        ("GET", "heal/costs"),
         ("GET", "costs/by-project"),
         ("GET", "costs/projections"),
         ("GET", "costs/some-service"),
@@ -278,7 +281,6 @@ def test_route_outside_the_allowlist_is_404(env, upstream, method, path):
     "method,path,allow",
     [
         ("GET", "heal", "POST"),
-        ("GET", "heal/costs", "POST"),
         ("GET", "agents/ecr-healer/start", "POST"),
         ("POST", "dashboard", "GET"),
         ("POST", "costs/summary", "GET"),
@@ -731,6 +733,9 @@ def test_mutating_call_is_audited_without_secrets(env, upstream, capsys):
     assert rows[0]["method"] == "POST"
     assert rows[0]["path"] == "agents/ecr-healer/start"
     assert rows[0]["status"] == 200
+    assert rows[0]["upstream_status"] == 200
+    assert rows[0]["outcome"] == "ok"
+    assert "reason" not in rows[0]
     assert rows[0]["actor"] == "u-test"
     assert env.service_token not in out
     assert caller_jwt not in out
@@ -750,6 +755,151 @@ def test_failed_read_is_logged_without_secrets(env, upstream, capsys):
     assert [r["outcome"] for r in rows] == ["error"]
     assert env.service_token not in out
     assert caller_jwt not in out
+
+
+def _one_refusal(out: str, status: int, reason: str) -> dict:
+    """The single audit line a refused call must write."""
+    rows = _audit_lines(out)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["outcome"] == "rejected"
+    assert row["reason"] == reason
+    assert row["status"] == status
+    assert row["upstream_status"] is None
+    assert row["actor"] == "u-test"
+    return row
+
+
+def test_refusal_reasons_are_a_fixed_set():
+    assert main.AGENTS_REJECT_REASONS == {
+        "bad_path",
+        "not_allowlisted",
+        "method_not_allowed",
+        "not_configured",
+        "body_too_large",
+        "unsupported_media_type",
+        "invalid_json",
+    }
+
+
+@pytest.mark.parametrize(
+    "method,path,kw,status,reason",
+    [
+        ("GET", "stats", {}, 404, "not_allowlisted"),
+        ("POST", "start-all", {}, 404, "not_allowlisted"),
+        ("POST", "stop-all", {}, 404, "not_allowlisted"),
+        ("POST", "heal/costs", {}, 404, "not_allowlisted"),
+        ("POST", "dashboard", {}, 405, "method_not_allowed"),
+        ("GET", "heal", {}, 405, "method_not_allowed"),
+        (
+            "POST",
+            "heal",
+            {"content": b"agent=ecr-healer", "headers": {"Content-Type": "text/plain"}},
+            415,
+            "unsupported_media_type",
+        ),
+        (
+            "POST",
+            "heal",
+            {"content": b"{not json", "headers": {"Content-Type": "application/json"}},
+            400,
+            "invalid_json",
+        ),
+        ("POST", "heal", {"json": {"pad": "x" * (64 * 1024)}}, 413, "body_too_large"),
+    ],
+)
+def test_each_refusal_writes_one_audit_line(env, upstream, capsys, method, path, kw, status, reason):
+    kw = dict(kw)
+    caller_jwt = mint(env)
+    headers = {**bearer(caller_jwt), **kw.pop("headers", {})}
+    resp = client.request(method, "/api/agents/" + path, headers=headers, **kw)
+    assert resp.status_code == status
+    out = capsys.readouterr().out
+    row = _one_refusal(out, status, reason)
+    assert row["method"] == method
+    # This path passed the path rules, so the validated path is logged.
+    assert row["path"] == path
+    assert upstream.requests == []
+    assert env.service_token not in out
+    assert caller_jwt not in out
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_not_configured_refusal_is_audited(env, upstream, capsys, monkeypatch, method):
+    monkeypatch.delenv("AGENTS_SERVICE_TOKEN", raising=False)
+    path = "dashboard" if method == "GET" else "agents/ecr-healer/stop"
+    resp = call(method, path, headers=bearer(mint(env)))
+    assert resp.status_code == 503
+    row = _one_refusal(capsys.readouterr().out, 503, "not_configured")
+    assert row["path"] == path
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "%2e%2e/{m}",
+        "agents%2f{m}%2fstatus",
+        "%252e%252e/{m}",
+        "agents/{m}%5cstatus",
+        "{m}/",
+        "agents//{m}",
+        "agents/{m}@evil.test/status",
+        # The route matches up to a trailing newline; the raw-path check
+        # refuses it.
+        "{m}%0a",
+    ],
+)
+def test_bad_path_refusal_is_audited_without_the_path(env, upstream, capsys, template):
+    marker = "zz" + secrets.token_hex(6)
+    resp = client.get("/api/agents/" + template.format(m=marker), headers=bearer(mint(env)))
+    assert resp.status_code == 400
+    out = capsys.readouterr().out
+    row = _one_refusal(out, 400, "bad_path")
+    assert "path" not in row
+    assert marker not in out
+    assert upstream.requests == []
+
+
+def test_forged_log_line_in_path_never_reaches_the_proxy(env, upstream, capsys):
+    # A newline inside the path doesn't match the route at all, so a forged
+    # JSON line can't be written as an agents.proxy entry.
+    marker = "zz" + secrets.token_hex(6)
+    forged = "%0a%7B%22audit%22%3Atrue%2C%22event%22%3A%22agents.proxy%22%7D"
+    resp = client.get(f"/api/agents/{marker}{forged}", headers=bearer(mint(env)))
+    assert resp.status_code == 404
+    out = capsys.readouterr().out
+    assert _audit_lines(out) == []
+    assert marker not in out
+    assert upstream.requests == []
+
+
+def test_literal_dot_refusal_is_audited_without_the_path(env, upstream, capsys):
+    marker = "zz" + secrets.token_hex(6)
+    status, _ = raw_asgi("POST", f"/api/agents/agents/../{marker}".encode(), bearer(mint(env)))
+    assert status == 400
+    out = capsys.readouterr().out
+    row = _one_refusal(out, 400, "bad_path")
+    assert row["method"] == "POST"
+    assert "path" not in row
+    assert marker not in out
+    assert upstream.requests == []
+
+
+def test_upstream_host_check_refusal_is_audited(env, upstream, capsys, monkeypatch):
+    # Not reachable through the path rules; force it to test the last line.
+    class OtherHostBase:
+        scheme, host, port, path = "http", "agents.test", None, ""
+
+        def copy_with(self, path: str) -> httpx.URL:
+            return httpx.URL("http://elsewhere.test" + path)
+
+    monkeypatch.setattr(main, "_agents_base_url", lambda: OtherHostBase())
+    resp = call("GET", "dashboard", headers=bearer(mint(env)))
+    assert resp.status_code == 400
+    row = _one_refusal(capsys.readouterr().out, 400, "bad_path")
+    assert "path" not in row
+    assert upstream.requests == []
 
 
 # ---------------------------------------------------------------------------

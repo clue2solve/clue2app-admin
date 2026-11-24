@@ -3646,6 +3646,10 @@ def run_ci_trigger(
 #   * Cross-origin: only GET /api/agents/costs and /api/agents/costs/*, only
 #     from CONSOLE_ORIGINS, Authorization request header only, never with
 #     credentials (AgentsCostsCorsMiddleware, below).
+#   * Audit (`agents.proxy` lines): every refused call, with a fixed reason
+#     code from AGENTS_REJECT_REASONS and the path only once it has passed
+#     the path rules; of the calls that reach upstream, every POST and every
+#     failure.
 # ============================================================================
 
 import re  # noqa: E402
@@ -3658,10 +3662,10 @@ AGENTS_PROXY_PREFIX = "/api/agents/"
 # Agent names as registered in the agents service (ecr-healer, cost-tracker…).
 _AGENT_NAME = r"[a-z0-9][a-z0-9_-]{0,63}"
 
-# (method, upstream path). Each entry is called by a UI today:
+# (method, upstream path). Exactly the calls the UIs make, nothing more:
 #   admin   frontend/src/components/AgentsTab.tsx, AgentDetailPage.tsx
 #   console src/pages/Costs.js, src/pages/Metrics.js,
-#           src/components/MetricsPanel.js
+#           src/components/MetricsPanel.js (GETs only)
 AGENTS_PROXY_ALLOWLIST: List[Tuple[str, str]] = [
     # admin
     ("GET", r"dashboard"),
@@ -3678,7 +3682,6 @@ AGENTS_PROXY_ALLOWLIST: List[Tuple[str, str]] = [
     ("GET", r"costs/trends"),
     ("GET", r"costs/pricing-model"),
     ("GET", r"costs/metrics-history"),
-    ("POST", r"heal/costs"),
 ]
 _AGENTS_PROXY_RULES = [(m, re.compile(p)) for m, p in AGENTS_PROXY_ALLOWLIST]
 
@@ -3794,6 +3797,46 @@ def _agents_error(status: int, error: str, message: str) -> JSONResponse:
     return resp
 
 
+# Fixed reason codes for calls refused before anything is sent upstream.
+AGENTS_REJECT_REASONS = frozenset(
+    {
+        "bad_path",
+        "not_allowlisted",
+        "method_not_allowed",
+        "not_configured",
+        "body_too_large",
+        "unsupported_media_type",
+        "invalid_json",
+    }
+)
+
+
+def _agents_reject(
+    claims: Dict[str, Any],
+    method: str,
+    resp: Response,
+    reason: str,
+    path: Optional[str] = None,
+) -> Response:
+    """Write one audit line for a refused call, then return its response.
+
+    `reason` is one of AGENTS_REJECT_REASONS. Pass `path` only once it has
+    passed the path rules (segments of [A-Za-z0-9_-]); a path that failed them
+    is caller-controlled and is never logged."""
+    fields: Dict[str, Any] = {
+        "actor": claims.get("sub") or "unknown",
+        "method": method,
+        "upstream_status": None,
+        "status": resp.status_code,
+        "outcome": "rejected",
+        "reason": reason if reason in AGENTS_REJECT_REASONS else "unknown",
+    }
+    if path is not None:
+        fields["path"] = path
+    _audit_log("agents.proxy", **fields)
+    return resp
+
+
 def _agents_map_response(status: int, content_type: str, data: bytes) -> Response:
     """Turn the upstream answer into what the browser gets.
 
@@ -3846,46 +3889,83 @@ async def agents_proxy(
     """Forward an allowlisted call to the agents service (see block comment)."""
     method = request.method.upper()
 
+    # Every refusal below writes one audit line with a fixed reason code
+    # (_agents_reject). Nothing has been sent upstream at that point.
     if not _agents_path_is_clean(path) or not _agents_raw_path_is_plain(request):
-        # Don't echo the path back: it is attacker-controlled.
-        return _agents_error(400, "BAD_REQUEST", "invalid agents path")
+        # Don't echo or log the path: it is attacker-controlled.
+        return _agents_reject(
+            claims, method, _agents_error(400, "BAD_REQUEST", "invalid agents path"), "bad_path"
+        )
 
+    # From here on `path` has passed the path rules, so it may be logged.
     allowed = _agents_allowed_methods(path)
     if not allowed:
-        return _agents_error(404, "NOT_FOUND", "unknown agents route")
+        return _agents_reject(
+            claims,
+            method,
+            _agents_error(404, "NOT_FOUND", "unknown agents route"),
+            "not_allowlisted",
+            path,
+        )
     if method not in allowed:
         resp = _agents_error(405, "METHOD_NOT_ALLOWED", "method not allowed on this agents route")
         resp.headers["Allow"] = ", ".join(sorted(set(allowed)))
-        return resp
+        return _agents_reject(claims, method, resp, "method_not_allowed", path)
 
     token = _agents_service_token()
     base = _agents_base_url()
     if token is None or base is None:
-        return _agents_error(
-            503,
-            "AGENTS_PROXY_NOT_CONFIGURED",
-            "the agents proxy is not configured on this admin instance",
+        return _agents_reject(
+            claims,
+            method,
+            _agents_error(
+                503,
+                "AGENTS_PROXY_NOT_CONFIGURED",
+                "the agents proxy is not configured on this admin instance",
+            ),
+            "not_configured",
+            path,
         )
 
     body = b""
     if method == "POST":
         body = await request.body()
         if len(body) > _AGENTS_MAX_REQUEST_BODY_BYTES:
-            return _agents_error(413, "PAYLOAD_TOO_LARGE", "request body too large")
+            return _agents_reject(
+                claims,
+                method,
+                _agents_error(413, "PAYLOAD_TOO_LARGE", "request body too large"),
+                "body_too_large",
+                path,
+            )
         if body:
             if not _agents_is_json(request.headers.get("content-type", "")):
-                return _agents_error(
-                    415, "UNSUPPORTED_MEDIA_TYPE", "request body must be application/json"
+                return _agents_reject(
+                    claims,
+                    method,
+                    _agents_error(
+                        415, "UNSUPPORTED_MEDIA_TYPE", "request body must be application/json"
+                    ),
+                    "unsupported_media_type",
+                    path,
                 )
             try:
                 json.loads(body)
             except ValueError:
-                return _agents_error(400, "BAD_REQUEST", "request body is not valid JSON")
+                return _agents_reject(
+                    claims,
+                    method,
+                    _agents_error(400, "BAD_REQUEST", "request body is not valid JSON"),
+                    "invalid_json",
+                    path,
+                )
 
     target = base.copy_with(path=base.path.rstrip("/") + "/" + path)
     if (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port):
         # Unreachable given the path rules above; kept as a last line.
-        return _agents_error(400, "BAD_REQUEST", "invalid agents path")
+        return _agents_reject(
+            claims, method, _agents_error(400, "BAD_REQUEST", "invalid agents path"), "bad_path"
+        )
 
     params = [
         (k, v)
@@ -3927,10 +4007,10 @@ async def agents_proxy(
         result = _agents_error(502, "AGENTS_UNREACHABLE", "agents service is unreachable")
         outcome = "unreachable"
 
-    # Audit every call that changes something, and every failure. Reads that
-    # succeed are polled every 30s by the UI and would only add noise. Only
-    # the validated path and status codes are logged: never headers, tokens
-    # or upstream bodies.
+    # Of the calls that reached upstream, audit every one that changes
+    # something and every failure. Reads that succeed are polled every 30s by
+    # the UI and would only add noise. Only the validated path and status
+    # codes are logged: never headers, tokens, query strings or bodies.
     if method != "GET" or outcome != "ok":
         _audit_log(
             "agents.proxy",
