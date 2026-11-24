@@ -3951,7 +3951,10 @@ async def agents_proxy(
                 )
             try:
                 json.loads(body)
-            except ValueError:
+            except (ValueError, RecursionError):
+                # RecursionError: a deeply nested body (for example 30,000 '['
+                # under the size cap) must be refused and audited like any
+                # other invalid body, not escape as a 500.
                 return _agents_reject(
                     claims,
                     method,

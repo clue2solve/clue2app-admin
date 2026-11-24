@@ -92,6 +92,14 @@ with `kubectl -n control get image aws-dashboard -o yaml | grep -A3 source:`.)
 
 ### 2c. Frontend static assets
 
+> **Current source of `backend/static/`:** branch `static-src/sck-755`, the
+> deployed frontend baseline (670ecfc) plus the agents call-site change from
+> #69. Until the frontend upgrade (MUI 9 / React 19) ships in its own PR,
+> rebuild `backend/static/` from that branch, not from `frontend/` on `main`:
+> `git worktree add /tmp/admin-static origin/static-src/sck-755`, then
+> `npm ci && npm run build` in its `frontend/`, and copy `dist/**` into
+> `backend/static/`.
+
 `build.sh` builds the React frontend and copies `frontend/dist/**` into
 `backend/static/`. For the c2a kpack build to serve the SPA, that static
 directory must exist at build time. Two options:

@@ -805,6 +805,15 @@ def test_refusal_reasons_are_a_fixed_set():
             400,
             "invalid_json",
         ),
+        (
+            # Deeply nested JSON under the size cap makes json.loads raise
+            # RecursionError, which must be refused and audited, not a 500.
+            "POST",
+            "heal",
+            {"content": b"[" * 30000 + b"]" * 30000, "headers": {"Content-Type": "application/json"}},
+            400,
+            "invalid_json",
+        ),
         ("POST", "heal", {"json": {"pad": "x" * (64 * 1024)}}, 413, "body_too_large"),
     ],
 )
